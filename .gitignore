@@ -11,7 +11,9 @@ node_modules
 .venv-demucs/
 __pycache__/
 *.py[cod]
+backend/data/
 dist
+admin-dist
 dist-ssr
 .output
 .vinxi

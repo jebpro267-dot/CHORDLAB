@@ -1,4 +1,4 @@
-import { backendUrl } from "./backend";
+import { backendFetch } from "./backend";
 
 /**
  * Adapter for the ChordMini API (beat tracking + chord recognition).
@@ -329,7 +329,7 @@ export async function analyzeWithChordMini(
   body.append("chordModel", models.chordModel);
 
   try {
-    const res = await fetch(backendUrl("/api/chordmini"), { method: "POST", body });
+    const res = await backendFetch("/api/chordmini", { method: "POST", body });
     const json = (await res.json()) as Json;
     if (!json["ok"]) {
       return { ok: false, reason: String(json["reason"] ?? "ChordMini is unavailable") };

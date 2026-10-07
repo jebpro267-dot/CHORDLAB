@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import importlib.util
 import json
 import os
 import re
+import secrets
+import sqlite3
 import subprocess
 import tempfile
 import zipfile
@@ -11,7 +17,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, HttpUrl
 from starlette.concurrency import run_in_threadpool
@@ -20,6 +26,8 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
+SETTINGS_PATH = ROOT / "backend" / "data" / "app_settings.json"
+DATABASE_PATH = Path(os.getenv("APP_DATABASE_PATH", ROOT / "backend" / "data" / "chordlab.sqlite3"))
 MAX_ANALYSIS_BYTES = 20 * 1024 * 1024
 MAX_SEPARATION_BYTES = 50 * 1024 * 1024
 STEM_NAMES = ("vocals", "drums", "bass", "other")
@@ -60,6 +68,7 @@ allowed_origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
@@ -79,6 +88,209 @@ class LyricsLookup(BaseModel):
 class RomanizeRequest(BaseModel):
     lyrics: str = Field(min_length=1)
     style: str = Field(pattern="^(hinglish|tanglish|auto|english)$")
+
+
+class UserCredentials(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class AdminCredentials(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class FeatureFlags(BaseModel):
+    song_analysis: bool = True
+    chordmini_analysis: bool = True
+    local_analysis: bool = True
+    link_import: bool = True
+    lyrics_lookup: bool = True
+    lyric_romanization: bool = True
+    stem_separation: bool = True
+    chord_diagrams: bool = True
+    live_detection: bool = True
+    tuner: bool = True
+
+
+class NavigationSettings(BaseModel):
+    library: bool = True
+    analyze: bool = True
+    live: bool = True
+    chords: bool = True
+    tuner: bool = True
+
+
+class AppearanceSettings(BaseModel):
+    app_name: str = Field(default="ChordLab", min_length=1, max_length=40)
+    home_title: str = Field(default="Your song library", min_length=1, max_length=80)
+    home_description: str = Field(
+        default="Chords, key, tempo, lyrics and printable sheets — all on your device.",
+        min_length=1,
+        max_length=240,
+    )
+    empty_title: str = Field(default="No songs analyzed yet", min_length=1, max_length=80)
+    empty_description: str = Field(
+        default="Upload an audio file and ChordLab will work out the chords, key and tempo.",
+        min_length=1,
+        max_length=240,
+    )
+    primary_color: str = Field(default="#eeb64a", pattern="^#[0-9a-fA-F]{6}$")
+    accent_color: str = Field(default="#4bbdb4", pattern="^#[0-9a-fA-F]{6}$")
+
+
+class LayoutSettings(BaseModel):
+    show_quick_actions: bool = True
+    show_song_search: bool = True
+
+
+class AppSettings(BaseModel):
+    features: FeatureFlags = Field(default_factory=FeatureFlags)
+    navigation: NavigationSettings = Field(default_factory=NavigationSettings)
+    appearance: AppearanceSettings = Field(default_factory=AppearanceSettings)
+    layout: LayoutSettings = Field(default_factory=LayoutSettings)
+
+
+def load_app_settings() -> AppSettings:
+    try:
+        payload = json.loads(SETTINGS_PATH.read_text())
+        return AppSettings.model_validate(payload)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return AppSettings()
+
+
+def save_app_settings(settings: AppSettings) -> AppSettings:
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SETTINGS_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(settings.model_dump(mode="json"), indent=2) + "\n")
+    temporary.replace(SETTINGS_PATH)
+    return settings
+
+
+def _connect_database() -> sqlite3.Connection:
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DATABASE_PATH, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    iterations = 420_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    return "$".join((
+        "pbkdf2_sha256",
+        str(iterations),
+        base64.b64encode(salt).decode(),
+        base64.b64encode(digest).decode(),
+    ))
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        algorithm, rounds, salt, expected = stored.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), base64.b64decode(salt), int(rounds)
+        )
+        return hmac.compare_digest(base64.b64encode(digest).decode(), expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def _initialize_auth_database() -> None:
+    with _connect_database() as connection:
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS accounts (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK (kind IN ('user', 'admin')),
+                email TEXT UNIQUE,
+                username TEXT UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS sessions (
+                token_hash TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        admin_password = os.getenv("ADMIN_PASSWORD", "")
+        admin_username = os.getenv("ADMIN_USERNAME", "jebin").strip()
+        if admin_password and admin_username:
+            existing_admin = connection.execute(
+                "SELECT id FROM accounts WHERE kind = 'admin' LIMIT 1"
+            ).fetchone()
+            if existing_admin is None:
+                connection.execute(
+                    "INSERT INTO accounts (id, kind, username, password_hash) VALUES (?, 'admin', ?, ?)",
+                    (secrets.token_hex(16), admin_username, _hash_password(admin_password)),
+                )
+
+
+def _issue_session(account_id: str, replace_existing: bool = False) -> str:
+    token = secrets.token_urlsafe(36)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with _connect_database() as connection:
+        if replace_existing:
+            connection.execute("DELETE FROM sessions WHERE account_id = ?", (account_id,))
+        connection.execute(
+            "INSERT INTO sessions (token_hash, account_id) VALUES (?, ?)",
+            (token_hash, account_id),
+        )
+    return token
+
+
+def _account_for_token(token: str) -> sqlite3.Row | None:
+    _initialize_auth_database()
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with _connect_database() as connection:
+        return connection.execute(
+            """SELECT accounts.id, accounts.kind, accounts.email, accounts.username
+               FROM sessions JOIN accounts ON accounts.id = sessions.account_id
+               WHERE sessions.token_hash = ?""",
+            (token_hash,),
+        ).fetchone()
+
+
+def require_account(authorization: str | None = Header(default=None)) -> sqlite3.Row:
+    token = authorization.removeprefix("Bearer ") if authorization else ""
+    if not token:
+        raise HTTPException(401, "Sign in to continue")
+    account = _account_for_token(token)
+    if account is None:
+        raise HTTPException(401, "Session expired. Please sign in again.")
+    return account
+
+
+def require_admin(account: sqlite3.Row = Depends(require_account)) -> sqlite3.Row:
+    if account["kind"] != "admin":
+        raise HTTPException(403, "Administrator access required")
+    return account
+
+
+def require_user(account: sqlite3.Row = Depends(require_account)) -> sqlite3.Row:
+    if account["kind"] != "user":
+        raise HTTPException(403, "User account required")
+    return account
+
+
+def _session_response(account: sqlite3.Row, token: str) -> dict:
+    identity = {"id": account["id"], "role": account["kind"]}
+    if account["email"]:
+        identity["email"] = account["email"]
+    if account["username"]:
+        identity["username"] = account["username"]
+    return {"token": token, "account": identity}
+
+
+def require_feature(feature: str) -> None:
+    if not getattr(load_app_settings().features, feature):
+        raise HTTPException(503, f"{feature.replace('_', ' ').capitalize()} is paused by the administrator")
 
 
 def _unwrap_result(payload: object, keys: tuple[str, ...]) -> dict:
@@ -130,12 +342,129 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": "ChordLab API"}
 
 
-@app.post("/api/chordmini")
+@app.post("/api/auth/register")
+async def register_user(credentials: UserCredentials) -> dict:
+    email = credentials.email.strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise HTTPException(422, "Enter a valid email address")
+    _initialize_auth_database()
+    account_id = secrets.token_hex(16)
+    try:
+        with _connect_database() as connection:
+            connection.execute(
+                "INSERT INTO accounts (id, kind, email, password_hash) VALUES (?, 'user', ?, ?)",
+                (account_id, email, _hash_password(credentials.password)),
+            )
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(409, "An account with this email already exists") from error
+    with _connect_database() as connection:
+        account = connection.execute(
+            "SELECT id, kind, email, username FROM accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+    return _session_response(account, _issue_session(account_id))
+
+
+@app.post("/api/auth/login")
+async def login_user(credentials: UserCredentials) -> dict:
+    _initialize_auth_database()
+    email = credentials.email.strip().lower()
+    with _connect_database() as connection:
+        account = connection.execute(
+            "SELECT id, kind, email, username, password_hash FROM accounts WHERE kind = 'user' AND email = ?",
+            (email,),
+        ).fetchone()
+    if account is None or not _verify_password(credentials.password, account["password_hash"]):
+        raise HTTPException(401, "Email or password is incorrect")
+    return _session_response(account, _issue_session(account["id"]))
+
+
+@app.post("/api/admin/login")
+async def login_admin(credentials: AdminCredentials) -> dict:
+    _initialize_auth_database()
+    if not os.getenv("ADMIN_PASSWORD"):
+        raise HTTPException(503, "Set ADMIN_PASSWORD on the FastAPI server before admin sign-in")
+    username = credentials.username.strip()
+    with _connect_database() as connection:
+        account = connection.execute(
+            "SELECT id, kind, email, username, password_hash FROM accounts WHERE kind = 'admin' AND username = ?",
+            (username,),
+        ).fetchone()
+    if account is None or not _verify_password(credentials.password, account["password_hash"]):
+        raise HTTPException(401, "Username or password is incorrect")
+    return _session_response(account, _issue_session(account["id"], replace_existing=True))
+
+
+@app.get("/api/auth/me")
+async def current_user(account: sqlite3.Row = Depends(require_user)) -> dict:
+    return {"id": account["id"], "email": account["email"], "role": "user"}
+
+
+@app.post("/api/auth/logout")
+async def logout(
+    authorization: str | None = Header(default=None),
+    account: sqlite3.Row = Depends(require_account),
+) -> dict[str, bool]:
+    token = authorization.removeprefix("Bearer ") if authorization else ""
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    with _connect_database() as connection:
+        connection.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+    return {"ok": True}
+
+
+@app.get("/api/public-config")
+async def public_config() -> dict:
+    return load_app_settings().model_dump(mode="json")
+
+
+@app.get("/api/admin/settings", dependencies=[Depends(require_admin)])
+async def admin_settings() -> dict:
+    return load_app_settings().model_dump(mode="json")
+
+
+@app.put("/api/admin/settings", dependencies=[Depends(require_admin)])
+async def update_admin_settings(settings: AppSettings) -> dict:
+    return save_app_settings(settings).model_dump(mode="json")
+
+
+async def _probe_service(client: httpx.AsyncClient, name: str, url: str) -> dict[str, str]:
+    try:
+        response = await client.get(url)
+        status = "healthy" if response.status_code < 500 else "degraded"
+        return {"name": name, "status": status, "detail": f"HTTP {response.status_code}"}
+    except httpx.HTTPError as error:
+        return {"name": name, "status": "unavailable", "detail": type(error).__name__}
+
+
+@app.get("/api/admin/health", dependencies=[Depends(require_admin)])
+async def admin_health() -> dict:
+    settings = load_app_settings()
+    checks = [{"name": "ChordLab API", "status": "healthy", "detail": "API process is responding"}]
+    async with httpx.AsyncClient(timeout=3) as client:
+        probes = []
+        if settings.features.chordmini_analysis:
+            base = os.getenv("CHORDMINI_API_URL", CHORDMINI_DEFAULT).rstrip("/")
+            probes.append(_probe_service(client, "ChordMini", base))
+        if os.getenv("AI_API_KEY"):
+            base = os.getenv("AI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+            probes.append(_probe_service(client, "AI provider", f"{base}/models"))
+        if probes:
+            checks.extend(await asyncio.gather(*probes))
+    checks.append({
+        "name": "Demucs",
+        "status": "healthy" if importlib.util.find_spec("demucs") else "unavailable",
+        "detail": "Python package installed" if importlib.util.find_spec("demucs") else "Install Demucs in the API environment",
+    })
+    return {"checks": checks, "features": settings.features.model_dump(mode="json")}
+
+
+@app.post("/api/chordmini", dependencies=[Depends(require_user)])
 async def chordmini(
     file: UploadFile = File(...),
     beatModel: str = Form(default="auto"),
     chordModel: str = Form(default="chord-cnn-lstm"),
 ) -> dict:
+    require_feature("song_analysis")
+    require_feature("chordmini_analysis")
     audio = await file.read(MAX_ANALYSIS_BYTES + 1)
     if not audio:
         raise HTTPException(400, "Audio file is empty")
@@ -175,8 +504,9 @@ def _note_id(root: str) -> str:
     return normalized
 
 
-@app.get("/api/chords")
+@app.get("/api/chords", dependencies=[Depends(require_user)])
 async def chord_catalog(label: str = "") -> dict:
+    require_feature("chord_diagrams")
     match = re.fullmatch(r"([A-Ga-g](?:#|b)?)(.*)", label)
     if not match:
         raise HTTPException(400, "Invalid chord label")
@@ -245,8 +575,9 @@ def _separate_audio(audio: bytes, filename: str) -> bytes:
         return archive_path.read_bytes()
 
 
-@app.post("/api/separate")
+@app.post("/api/separate", dependencies=[Depends(require_user)])
 async def separate(file: UploadFile = File(...)):
+    require_feature("stem_separation")
     from fastapi.responses import Response
 
     audio = await file.read(MAX_SEPARATION_BYTES + 1)
@@ -261,8 +592,9 @@ async def separate(file: UploadFile = File(...)):
         raise HTTPException(502, f"Demucs could not separate this audio. {error}") from error
 
 
-@app.post("/api/import-link")
+@app.post("/api/import-link", dependencies=[Depends(require_user)])
 async def import_link(data: LinkImport) -> dict:
+    require_feature("link_import")
     url = str(data.url)
     host = (urlsplit(url).hostname or "").removeprefix("www.").lower()
     if host in {"youtube.com", "youtu.be", "m.youtube.com"}:
@@ -309,8 +641,9 @@ def _parse_lrc(lrc: str) -> list[dict]:
     return sorted(lines, key=lambda line: line["time"])
 
 
-@app.post("/api/lyrics")
+@app.post("/api/lyrics", dependencies=[Depends(require_user)])
 async def fetch_lyrics(data: LyricsLookup) -> dict:
+    require_feature("lyrics_lookup")
     params = {"track_name": data.title.strip()}
     if data.artist and data.artist.strip():
         params["artist_name"] = data.artist.strip()
@@ -373,8 +706,9 @@ def _offline_tanglish(lyrics: str) -> str:
     return "\n".join(output)
 
 
-@app.post("/api/romanize")
+@app.post("/api/romanize", dependencies=[Depends(require_user)])
 async def romanize(data: RomanizeRequest) -> dict[str, str]:
+    require_feature("lyric_romanization")
     tamil = bool(TAMIL_RE.search(data.lyrics)) and data.style != "english"
     fallback = _offline_tanglish(data.lyrics) if tamil else None
     api_key = os.getenv("AI_API_KEY")

@@ -1,5 +1,5 @@
 import { unzipSync } from "fflate";
-import { backendUrl } from "./backend";
+import { backendFetch } from "./backend";
 import { STEMS, type StemName } from "./studio";
 
 export async function startSeparation(
@@ -7,7 +7,7 @@ export async function startSeparation(
 ): Promise<{ name: StemName; blob: Blob }[]> {
   const form = new FormData();
   form.append("file", file, "audio");
-  const res = await fetch(backendUrl("/api/separate"), { method: "POST", body: form });
+  const res = await backendFetch("/api/separate", { method: "POST", body: form });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
     throw new Error(body.detail ?? body.error ?? "Could not separate stems.");
@@ -21,7 +21,7 @@ export async function startSeparation(
       ? [{
           name,
           blob: new Blob([entry[1]], {
-            type: path.toLowerCase().endsWith(".wav") ? "audio/wav" : "audio/mpeg",
+            type: entry[0].toLowerCase().endsWith(".wav") ? "audio/wav" : "audio/mpeg",
           }),
         }]
       : [];

@@ -5,7 +5,7 @@ const liveAppUrl = process.env["CAPACITOR_SERVER_URL"];
 const config: CapacitorConfig = {
   appId: "app.chordlab.mobile",
   appName: "ChordLab",
-  webDir: "dist/client",
+  webDir: "dist",
   ...(liveAppUrl ? { server: { url: liveAppUrl, cleartext: false } } : {}),
   android: {
     allowMixedContent: false,

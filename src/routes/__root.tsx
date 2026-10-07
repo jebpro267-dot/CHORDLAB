@@ -4,14 +4,14 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
-  HeadContent,
-  Scripts,
+  useRouterState,
 } from "@tanstack/react-router";
-import { type ReactNode } from "react";
 
-import appCss from "../styles.css?url";
 import { BottomNav } from "../components/BottomNav";
 import { Toaster } from "../components/ui/sonner";
+import { useAppSettings, AppSettingsProvider } from "../lib/app-settings";
+import { AuthProvider, useAuth } from "../lib/auth";
+import { AuthScreen } from "../components/AuthScreen";
 
 function NotFoundComponent() {
   return (
@@ -93,7 +93,6 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "twitter:card", content: "summary_large_image" },
     ],
     links: [
-      { rel: "stylesheet", href: appCss },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
@@ -103,37 +102,63 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
     ],
   }),
-  shellComponent: RootShell,
   component: RootComponent,
   notFoundComponent: NotFoundComponent,
   errorComponent: ErrorComponent,
 });
-
-function RootShell({ children }: { children: ReactNode }) {
-  return (
-    <html lang="en" className="dark">
-      <head>
-        <HeadContent />
-      </head>
-      <body>
-        {children}
-        <Scripts />
-      </body>
-    </html>
-  );
-}
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
 
   return (
     <QueryClientProvider client={queryClient}>
-      <div className="min-h-screen pb-24">
-        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-        <Outlet />
-      </div>
-      <BottomNav />
-      <Toaster position="top-center" richColors />
+      <AuthProvider>
+        <AppSettingsProvider>
+          <AppFrame />
+          <Toaster position="top-center" richColors />
+        </AppSettingsProvider>
+      </AuthProvider>
     </QueryClientProvider>
+  );
+}
+
+function AppFrame() {
+  const { settings, ready } = useAppSettings();
+  const auth = useAuth();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const flags = settings.features;
+  const unavailable =
+    (pathname === "/analyze" && (!flags.song_analysis || (!flags.chordmini_analysis && !flags.local_analysis))) ||
+    (pathname === "/live" && !flags.live_detection) ||
+    (pathname === "/tuner" && !flags.tuner) ||
+    (pathname === "/chords" && !flags.chord_diagrams) ||
+    (pathname === "/" && !settings.navigation.library);
+
+  return (
+    <>
+      {auth.ready && auth.account ? (
+        <>
+          <div className="min-h-screen pb-24">
+            {ready && unavailable ? (
+              <div className="mx-auto mt-20 max-w-md px-5 text-center">
+                <h1 className="text-xl font-semibold">This feature is temporarily unavailable</h1>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  An administrator has paused this part of the app.
+                </p>
+              </div>
+            ) : (
+              <Outlet />
+            )}
+          </div>
+          <BottomNav />
+        </>
+      ) : auth.ready ? (
+        <AuthScreen />
+      ) : (
+        <div className="flex min-h-screen items-center justify-center text-muted-foreground">
+          <span className="size-5 animate-spin rounded-full border-2 border-current border-r-transparent" />
+        </div>
+      )}
+    </>
   );
 }

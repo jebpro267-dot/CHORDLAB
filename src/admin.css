@@ -1,0 +1,135 @@
+.admin-login,
+.admin-shell {
+  --background: oklch(0.965 0.012 125);
+  --foreground: oklch(0.24 0.025 155);
+  --surface: oklch(0.99 0.004 120);
+  --surface-2: oklch(0.93 0.015 130);
+  --border: oklch(0.86 0.018 145);
+  --input: oklch(0.82 0.022 145);
+  --primary: oklch(0.47 0.12 155);
+  --primary-foreground: oklch(0.99 0.004 120);
+  --accent: oklch(0.73 0.12 82);
+  --muted-foreground: oklch(0.48 0.025 155);
+  --destructive: oklch(0.54 0.18 28);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive: var(--destructive);
+  color: var(--foreground);
+  color-scheme: light;
+  background-color: var(--background);
+  background-image:
+    linear-gradient(135deg, oklch(0.98 0.006 120), oklch(0.94 0.015 130)),
+    repeating-linear-gradient(0deg, transparent 0 35px, oklch(0.3 0.03 150 / 0.035) 36px);
+}
+
+.admin-login-panel,
+.admin-section,
+.admin-health-band,
+.admin-save-panel {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--surface) 96%, transparent);
+  box-shadow: 0 14px 38px oklch(0.3 0.04 150 / 0.08);
+}
+
+.admin-header {
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-mark {
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+
+.admin-health-band {
+  background: color-mix(in oklch, var(--surface) 82%, var(--accent));
+}
+
+.admin-health-item {
+  border: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklch, white 76%, var(--surface-2));
+}
+
+.admin-input {
+  min-height: 42px;
+  border: 1px solid var(--input);
+  border-radius: 8px;
+  padding: 0.625rem 0.75rem;
+  color: var(--foreground);
+  background: var(--background);
+  outline: none;
+}
+
+.admin-input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 25%, transparent);
+}
+
+.admin-primary,
+.admin-quiet {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 8px;
+  padding: 0.625rem 0.875rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition:
+    background-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.admin-primary {
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+
+.admin-primary:hover {
+  background: color-mix(in oklch, var(--primary) 88%, white);
+}
+
+.admin-quiet {
+  border: 1px solid var(--border);
+  color: var(--foreground);
+  background: var(--surface-2);
+}
+
+.admin-quiet:hover {
+  background: var(--muted);
+}
+
+.admin-primary:disabled,
+.admin-quiet:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.admin-switch {
+  width: 1.1rem;
+  height: 1.1rem;
+  accent-color: var(--primary);
+}
+
+.admin-color {
+  width: 2.75rem;
+  height: 2rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+  background: var(--background);
+}
+
+.admin-save-panel {
+  background: var(--surface-2);
+}

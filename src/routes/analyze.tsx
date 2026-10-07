@@ -32,6 +32,7 @@ import { importLink } from "@/lib/link-import.functions";
 import { fetchSyncedLyrics, type SyncedLine } from "@/lib/lyrics-fetch.functions";
 import { romanizeLyrics } from "@/lib/lyrics.functions";
 import { newId, saveSong } from "@/lib/storage";
+import { useAppSettings } from "@/lib/app-settings";
 
 export const Route = createFileRoute("/analyze")({
   head: () => ({
@@ -57,6 +58,7 @@ export const Route = createFileRoute("/analyze")({
 type Style = "auto" | "hinglish" | "tanglish" | "english";
 
 function AnalyzePage() {
+  const { settings } = useAppSettings();
   const navigate = useNavigate();
   const fileRef = useRef<HTMLInputElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -77,13 +79,18 @@ function AnalyzePage() {
   const [recSecs, setRecSecs] = useState(0);
   const [beatModel, setBeatModel] = useState<ChordMiniModels["beatModel"]>("auto");
   const [chordModel] = useState<ChordMiniModels["chordModel"]>("chord-cnn-lstm");
-  const [useChordMini, setUseChordMini] = useState(true);
+  const [useChordMini, setUseChordMini] = useState(settings.features.chordmini_analysis);
 
   useEffect(() => {
     if (!recording) return;
     const iv = window.setInterval(() => setRecSecs((s) => s + 1), 1000);
     return () => window.clearInterval(iv);
   }, [recording]);
+
+  useEffect(() => {
+    if (!settings.features.chordmini_analysis) setUseChordMini(false);
+    else if (!settings.features.local_analysis) setUseChordMini(true);
+  }, [settings.features.chordmini_analysis, settings.features.local_analysis]);
 
   function onPick(f: File | null) {
     if (!f) return;
@@ -184,7 +191,7 @@ function AnalyzePage() {
       let engine: "chordmini" | "local" = "local";
       let models: ChordMiniModels | undefined;
 
-      if (useChordMini) {
+      if (useChordMini && settings.features.chordmini_analysis) {
         setStage("Analysing with ChordMini");
         setProgress(15);
         const outcome = await analyzeWithChordMini(file, decoded.duration, {
@@ -197,11 +204,15 @@ function AnalyzePage() {
           models = outcome.models;
           setProgress(85);
         } else {
-          toast.warning(`${outcome.reason} — analysing on device instead`);
+          toast.warning(
+            settings.features.local_analysis
+              ? `${outcome.reason} — analysing on device instead`
+              : outcome.reason,
+          );
         }
       }
 
-      if (!analysis) {
+      if (!analysis && settings.features.local_analysis) {
         // Downsample to 22.05 kHz mono for a faster, cleaner chromagram.
         const off = new OfflineAudioContext(
           1,
@@ -221,10 +232,13 @@ function AnalyzePage() {
           },
         });
       }
+      if (!analysis) {
+        throw new Error("No analysis engine is available right now.");
+      }
 
       let lyricText = lyrics;
       let syncedLines = synced;
-      if (!lyricText.trim() && title.trim()) {
+      if (!lyricText.trim() && title.trim() && settings.features.lyrics_lookup) {
         setStage("Looking up lyrics");
         setProgress(88);
         const found = await grabLyrics(true);
@@ -233,7 +247,7 @@ function AnalyzePage() {
       }
 
       let romanized = "";
-      if (lyricText.trim() && style !== "english") {
+      if (lyricText.trim() && style !== "english" && settings.features.lyric_romanization) {
         setStage("Transliterating lyrics");
         setProgress(93);
         try {
@@ -285,22 +299,24 @@ function AnalyzePage() {
       </p>
 
       <div className="panel mt-5 p-4">
-        <Label htmlFor="link">YouTube or Spotify link</Label>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Imports the title, artist and artwork. Streaming apps don't allow their audio to be
-          downloaded, so record the track as it plays or pick the file below.
-        </p>
-        <div className="mt-2 flex gap-2">
-          <Input
-            id="link"
-            value={link}
-            placeholder="https://youtu.be/… or open.spotify.com/track/…"
-            onChange={(e) => setLink(e.target.value)}
-          />
-          <Button variant="secondary" onClick={() => void runImport()} disabled={importing}>
-            {importing ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />}
-          </Button>
-        </div>
+        {settings.features.link_import && <>
+          <Label htmlFor="link">YouTube or Spotify link</Label>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Imports the title, artist and artwork. Streaming apps don't allow their audio to be
+            downloaded, so record the track as it plays or pick the file below.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <Input
+              id="link"
+              value={link}
+              placeholder="https://youtu.be/… or open.spotify.com/track/…"
+              onChange={(e) => setLink(e.target.value)}
+            />
+            <Button variant="secondary" onClick={() => void runImport()} disabled={importing}>
+              {importing ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />}
+            </Button>
+          </div>
+        </>}
         {artwork && (
           <img
             src={artwork}
@@ -379,12 +395,14 @@ function AnalyzePage() {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="auto">ChordMini · auto beat model</SelectItem>
-            <SelectItem value="madmom">ChordMini · madmom (fast, 3/4 &amp; 4/4)</SelectItem>
-            <SelectItem value="beat-transformer">
-              ChordMini · beat-transformer (slow, complex mixes)
-            </SelectItem>
-            <SelectItem value="local">On-device only (offline)</SelectItem>
+            {settings.features.chordmini_analysis && <>
+              <SelectItem value="auto">ChordMini · auto beat model</SelectItem>
+              <SelectItem value="madmom">ChordMini · madmom (fast, 3/4 &amp; 4/4)</SelectItem>
+              <SelectItem value="beat-transformer">
+                ChordMini · beat-transformer (slow, complex mixes)
+              </SelectItem>
+            </>}
+            {settings.features.local_analysis && <SelectItem value="local">On-device only (offline)</SelectItem>}
           </SelectContent>
         </Select>
         <p className="mt-2 text-xs text-muted-foreground">
@@ -397,7 +415,7 @@ function AnalyzePage() {
       <div className="panel mt-4 p-4">
         <div className="flex items-center justify-between gap-2">
           <Label htmlFor="lyrics">Lyrics (optional)</Label>
-          <Button
+          {settings.features.lyrics_lookup && <Button
             size="sm"
             variant="secondary"
             onClick={() => void grabLyrics()}
@@ -409,7 +427,7 @@ function AnalyzePage() {
               <TextSearch className="size-4" />
             )}
             Fetch lyrics
-          </Button>
+          </Button>}
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
           Fetch time-synced lyrics by title and artist, or paste your own. Add markers like [Verse]

@@ -5,6 +5,7 @@ import { AudioLines, Guitar, Mic, Music2, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { listSongs, type Song } from "@/lib/storage";
+import { useAppSettings } from "@/lib/app-settings";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -29,6 +30,7 @@ export const Route = createFileRoute("/")({
 });
 
 function LibraryPage() {
+  const { settings } = useAppSettings();
   const [songs, setSongs] = useState<Song[]>([]);
   const [q, setQ] = useState("");
 
@@ -46,20 +48,28 @@ function LibraryPage() {
   return (
     <div className="mx-auto max-w-lg px-4 pt-6">
       <header>
-        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-primary">ChordLab</p>
-        <h1 className="mt-1 text-3xl font-semibold tracking-tight">Your song library</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Chords, key, tempo, lyrics and printable sheets — all on your device.
+        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-primary">
+          {settings.appearance.app_name}
         </p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">
+          {settings.appearance.home_title}
+        </h1>
+        <p className="mt-1 text-sm text-muted-foreground">{settings.appearance.home_description}</p>
       </header>
 
-      <div className="mt-5 grid grid-cols-3 gap-2">
-        <QuickAction to="/analyze" Icon={AudioLines} label="Analyze" />
-        <QuickAction to="/live" Icon={Mic} label="Live" />
-        <QuickAction to="/tuner" Icon={Guitar} label="Tuner" />
-      </div>
+      {settings.layout.show_quick_actions && <div className="mt-5 grid grid-cols-3 gap-2">
+        {([
+          { to: "/analyze", setting: "analyze", feature: settings.features.song_analysis && (settings.features.chordmini_analysis || settings.features.local_analysis), Icon: AudioLines, label: "Analyze" },
+          { to: "/live", setting: "live", feature: settings.features.live_detection, Icon: Mic, label: "Live" },
+          { to: "/tuner", setting: "tuner", feature: settings.features.tuner, Icon: Guitar, label: "Tuner" },
+        ] as const)
+          .filter(({ setting, feature }) => settings.navigation[setting] && feature)
+          .map(({ to, Icon, label }) => (
+            <QuickAction key={to} to={to as "/analyze" | "/live" | "/tuner"} Icon={Icon} label={label} />
+          ))}
+      </div>}
 
-      <div className="relative mt-5">
+      {settings.layout.show_song_search && <div className="relative mt-5">
         <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           value={q}
@@ -67,16 +77,16 @@ function LibraryPage() {
           placeholder="Search your songs"
           className="pl-9"
         />
-      </div>
+      </div>}
 
       {filtered.length === 0 ? (
         <div className="panel mt-5 flex flex-col items-center gap-3 p-8 text-center">
           <Music2 className="size-8 text-primary" />
           <p className="text-sm font-medium">
-            {songs.length === 0 ? "No songs analyzed yet" : "Nothing matches that search"}
+            {songs.length === 0 ? settings.appearance.empty_title : "Nothing matches that search"}
           </p>
           <p className="text-xs text-muted-foreground">
-            Upload an audio file and ChordLab will work out the chords, key and tempo.
+            {settings.appearance.empty_description}
           </p>
           <Button asChild className="mt-1">
             <Link to="/analyze">Analyze your first song</Link>

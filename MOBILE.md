@@ -3,16 +3,22 @@
 ChordLab is packaged with [Capacitor](https://capacitorjs.com), so the same
 code ships as a real Android (`.apk` / `.aab`) and iOS app. Everything the app
 stores — songs, chord sheets, settings and the recorded/imported audio — lives
-in on-device storage, so the app works without an account and without a server.
+in on-device storage. Users sign in with an email account stored by the separate
+FastAPI service; the user session remains active until sign-out. The API must be
+reachable for registration, login and server-backed features. Browser-based
+analysis, saved songs and tuning continue to run on the device.
 
 ## One-time setup on your computer
 
-Requirements: Node 20+, Android Studio (for Android), Xcode 15+ on a Mac (for iOS).
+Requirements: Node 20+, Python 3.10+, Android Studio (for Android), Xcode 15+ on a Mac (for iOS).
 
 ```bash
 git clone <your repo>
 cd <project>
 npm install
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r backend/requirements.txt
 
 # add the native projects
 npx cap add android
@@ -27,6 +33,10 @@ npx cap sync           # copies them + plugins into the native projects
 npx cap open android   # opens Android Studio  -> Run / Build APK
 npx cap open ios       # opens Xcode           -> Run / Archive
 ```
+
+Before building for a device, set `VITE_BACKEND_URL` to the deployed FastAPI
+origin and build the web assets with that environment value. Do not use
+`localhost` for a backend running on your development computer.
 
 ## Permissions
 
