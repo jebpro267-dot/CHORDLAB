@@ -74,6 +74,9 @@ at `http://localhost:5174/`. FastAPI's interactive API documentation is at
 on port 8000. Set `VITE_BACKEND_URL` when deploying the frontends and API to
 separate origins.
 
+When preparing a requested "commit everything", review and update this README
+to match the current project features and setup before committing.
+
 Set `ADMIN_PASSWORD` on the FastAPI server before the first admin sign-in. The
 admin username defaults to `jebin` and can be changed with `ADMIN_USERNAME`.
 On first authentication, FastAPI creates the administrator in
