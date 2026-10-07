@@ -10,7 +10,7 @@ in on-device storage, so the app works without an account and without a server.
 Requirements: Node 20+, Android Studio (for Android), Xcode 15+ on a Mac (for iOS).
 
 ```bash
-git clone <your repo>   # export the project to GitHub from Lovable first
+git clone <your repo>
 cd <project>
 npm install
 
@@ -41,10 +41,9 @@ to `ios/App/App/Info.plist`:
 
 ## Updating the app
 
-`capacitor.config.ts` points the native shell at the published Lovable URL, so
-publishing from Lovable updates the installed app without a new store build.
-To ship a fully bundled offline build instead, delete the `server` block in
-`capacitor.config.ts` and re-run `npm run build && npx cap sync`.
+By default, Capacitor uses the bundled web assets. To load a hosted web app
+inside the native shell, set `CAPACITOR_SERVER_URL` to its URL before running
+`npx cap sync`. Re-run `npm run build && npx cap sync` after changing the app.
 
 ## About YouTube and Spotify
 

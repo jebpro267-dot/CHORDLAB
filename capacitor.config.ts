@@ -1,16 +1,12 @@
 import type { CapacitorConfig } from "@capacitor/cli";
 
+const liveAppUrl = process.env["CAPACITOR_SERVER_URL"];
+
 const config: CapacitorConfig = {
-  appId: "app.lovable.chordlab",
+  appId: "app.chordlab.mobile",
   appName: "ChordLab",
   webDir: "dist/client",
-  server: {
-    // Loads the deployed app inside the native shell so audio analysis,
-    // the local song database and lyric transliteration all work offline-first
-    // while still receiving updates when you publish.
-    url: "https://lyrical-chords-unlocked.lovable.app",
-    cleartext: false,
-  },
+  ...(liveAppUrl ? { server: { url: liveAppUrl, cleartext: false } } : {}),
   android: {
     allowMixedContent: false,
   },
