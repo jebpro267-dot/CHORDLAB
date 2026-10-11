@@ -1,17 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import {
-  Cpu,
-  Link2,
-  Loader2,
-  Mic,
-  Music4,
-  Square,
-  TextSearch,
-  Upload,
-  Wand2,
-} from "lucide-react";
+import { Cpu, Link2, Loader2, Mic, Music4, Square, TextSearch, Upload, Wand2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,7 +17,7 @@ import {
 } from "@/components/ui/select";
 import { analyzeAudioBuffer, type AnalysisResult } from "@/lib/audio-analysis";
 import { putAudio } from "@/lib/audio-store";
-import { analyzeWithChordMini, type ChordMiniModels } from "@/lib/chordmini";
+import { analyzeWithChordMini, analyzeWithTensorFlow, type ChordMiniModels } from "@/lib/chordmini";
 import { importLink } from "@/lib/link-import.functions";
 import { fetchSyncedLyrics, type SyncedLine } from "@/lib/lyrics-fetch.functions";
 import { romanizeLyrics } from "@/lib/lyrics.functions";
@@ -56,6 +46,7 @@ export const Route = createFileRoute("/analyze")({
 });
 
 type Style = "auto" | "hinglish" | "tanglish" | "english";
+type AnalysisEngine = "tensorflow" | "chordmini-auto" | "madmom" | "beat-transformer" | "local";
 
 function AnalyzePage() {
   const { settings } = useAppSettings();
@@ -79,7 +70,13 @@ function AnalyzePage() {
   const [recSecs, setRecSecs] = useState(0);
   const [beatModel, setBeatModel] = useState<ChordMiniModels["beatModel"]>("auto");
   const [chordModel] = useState<ChordMiniModels["chordModel"]>("chord-cnn-lstm");
-  const [useChordMini, setUseChordMini] = useState(settings.features.chordmini_analysis);
+  const [selectedEngine, setSelectedEngine] = useState<AnalysisEngine>(
+    settings.features.tensorflow_analysis
+      ? "tensorflow"
+      : settings.features.chordmini_analysis
+        ? "chordmini-auto"
+        : "local",
+  );
 
   useEffect(() => {
     if (!recording) return;
@@ -88,9 +85,36 @@ function AnalyzePage() {
   }, [recording]);
 
   useEffect(() => {
-    if (!settings.features.chordmini_analysis) setUseChordMini(false);
-    else if (!settings.features.local_analysis) setUseChordMini(true);
-  }, [settings.features.chordmini_analysis, settings.features.local_analysis]);
+    setSelectedEngine((current) => {
+      const isChordMini = current !== "tensorflow" && current !== "local";
+      if (current === "tensorflow" && !settings.features.tensorflow_analysis) {
+        return settings.features.chordmini_analysis
+          ? "chordmini-auto"
+          : settings.features.local_analysis
+            ? "local"
+            : current;
+      }
+      if (isChordMini && !settings.features.chordmini_analysis) {
+        return settings.features.tensorflow_analysis
+          ? "tensorflow"
+          : settings.features.local_analysis
+            ? "local"
+            : current;
+      }
+      if (current === "local" && !settings.features.local_analysis) {
+        return settings.features.tensorflow_analysis
+          ? "tensorflow"
+          : settings.features.chordmini_analysis
+            ? "chordmini-auto"
+            : current;
+      }
+      return current;
+    });
+  }, [
+    settings.features.chordmini_analysis,
+    settings.features.local_analysis,
+    settings.features.tensorflow_analysis,
+  ]);
 
   function onPick(f: File | null) {
     if (!f) return;
@@ -188,14 +212,51 @@ function AnalyzePage() {
       const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
 
       let analysis: AnalysisResult | null = null;
-      let engine: "chordmini" | "local" = "local";
+      let engine: "tensorflow" | "chordmini" | "local" = "local";
       let models: ChordMiniModels | undefined;
 
-      if (useChordMini && settings.features.chordmini_analysis) {
+      if (selectedEngine === "tensorflow" && settings.features.tensorflow_analysis) {
+        setStage("Analysing with your TensorFlow model");
+        setProgress(15);
+        const outcome = await analyzeWithTensorFlow(file, decoded.duration);
+        if (outcome.ok) {
+          analysis = outcome.analysis;
+          engine = "tensorflow";
+          setProgress(85);
+        } else {
+          toast.warning(
+            settings.features.chordmini_analysis
+              ? `${outcome.reason} — trying ChordMini instead`
+              : settings.features.local_analysis
+                ? `${outcome.reason} — analysing on device instead`
+                : outcome.reason,
+          );
+          if (settings.features.chordmini_analysis) {
+            setStage("TensorFlow unavailable — trying ChordMini");
+            const fallback = await analyzeWithChordMini(file, decoded.duration, {
+              beatModel: "auto",
+              chordModel,
+            });
+            if (fallback.ok) {
+              analysis = fallback.analysis;
+              engine = "chordmini";
+              models = fallback.models;
+              setProgress(85);
+            }
+          }
+        }
+      }
+
+      if (
+        !analysis &&
+        selectedEngine !== "tensorflow" &&
+        selectedEngine !== "local" &&
+        settings.features.chordmini_analysis
+      ) {
         setStage("Analysing with ChordMini");
         setProgress(15);
         const outcome = await analyzeWithChordMini(file, decoded.duration, {
-          beatModel,
+          beatModel: selectedEngine === "chordmini-auto" ? "auto" : selectedEngine,
           chordModel,
         });
         if (outcome.ok) {
@@ -280,7 +341,11 @@ function AnalyzePage() {
       });
       setProgress(100);
       toast.success(
-        engine === "chordmini" ? "Analysed with ChordMini" : "Analysis complete (on device)",
+        engine === "tensorflow"
+          ? "Analysed with your TensorFlow model"
+          : engine === "chordmini"
+            ? "Analysed with ChordMini"
+            : "Analysis complete (on device)",
       );
       void navigate({ to: "/song/$id", params: { id } });
     } catch (e) {
@@ -295,7 +360,8 @@ function AnalyzePage() {
     <div className="mx-auto max-w-lg px-4 pt-6">
       <h1 className="text-2xl font-semibold tracking-tight">Analyze a song</h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        ChordMini handles beat and chord detection, with on-device analysis as backup.
+        Your TensorFlow chord model runs through the Python API, with ChordMini and on-device
+        analysis as fallbacks.
       </p>
 
       <div className="panel mt-5 p-4">
@@ -381,34 +447,39 @@ function AnalyzePage() {
           <Label>Analysis engine</Label>
         </div>
         <Select
-          value={useChordMini ? beatModel : "local"}
+          value={selectedEngine}
           onValueChange={(v) => {
-            if (v === "local") {
-              setUseChordMini(false);
-            } else {
-              setUseChordMini(true);
-              setBeatModel(v as ChordMiniModels["beatModel"]);
-            }
+            setSelectedEngine(v as AnalysisEngine);
+            if (v === "madmom" || v === "beat-transformer") setBeatModel(v);
           }}
         >
           <SelectTrigger className="mt-2">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {settings.features.chordmini_analysis && <>
-              <SelectItem value="auto">ChordMini · auto beat model</SelectItem>
-              <SelectItem value="madmom">ChordMini · madmom (fast, 3/4 &amp; 4/4)</SelectItem>
-              <SelectItem value="beat-transformer">
-                ChordMini · beat-transformer (slow, complex mixes)
-              </SelectItem>
-            </>}
-            {settings.features.local_analysis && <SelectItem value="local">On-device only (offline)</SelectItem>}
+            {settings.features.tensorflow_analysis && (
+              <SelectItem value="tensorflow">Your TensorFlow model · API</SelectItem>
+            )}
+            {settings.features.chordmini_analysis && (
+              <>
+                <SelectItem value="chordmini-auto">ChordMini · auto beat model</SelectItem>
+                <SelectItem value="madmom">ChordMini · madmom (fast, 3/4 &amp; 4/4)</SelectItem>
+                <SelectItem value="beat-transformer">
+                  ChordMini · beat-transformer (slow, complex mixes)
+                </SelectItem>
+              </>
+            )}
+            {settings.features.local_analysis && (
+              <SelectItem value="local">On-device only (offline)</SelectItem>
+            )}
           </SelectContent>
         </Select>
         <p className="mt-2 text-xs text-muted-foreground">
-          {useChordMini
-            ? "Chords via chord-cnn-lstm. ChordMini allows 2 analyses per minute — if it's busy, the on-device engine takes over automatically."
-            : "Everything runs on your device — your audio never leaves the phone."}
+          {selectedEngine === "tensorflow"
+            ? "Your trained TensorFlow model recognizes chords in the Python API, with ChordMini and on-device analysis as fallbacks."
+            : selectedEngine !== "local"
+              ? "ChordMini provides remote beat and chord recognition; on-device analysis is used if it is unavailable."
+              : "Everything runs on your device — your audio never leaves the phone."}
         </p>
       </div>
 

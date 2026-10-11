@@ -128,7 +128,9 @@ function AppFrame() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const flags = settings.features;
   const unavailable =
-    (pathname === "/analyze" && (!flags.song_analysis || (!flags.chordmini_analysis && !flags.local_analysis))) ||
+    (pathname === "/analyze" &&
+      (!flags.song_analysis ||
+        (!flags.tensorflow_analysis && !flags.chordmini_analysis && !flags.local_analysis))) ||
     (pathname === "/live" && !flags.live_detection) ||
     (pathname === "/tuner" && !flags.tuner) ||
     (pathname === "/chords" && !flags.chord_diagrams) ||

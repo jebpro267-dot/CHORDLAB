@@ -5,6 +5,7 @@ import { backendJson } from "./backend";
 export interface AppSettings {
   features: {
     song_analysis: boolean;
+    tensorflow_analysis: boolean;
     chordmini_analysis: boolean;
     local_analysis: boolean;
     link_import: boolean;
@@ -40,6 +41,7 @@ export interface AppSettings {
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   features: {
     song_analysis: true,
+    tensorflow_analysis: true,
     chordmini_analysis: true,
     local_analysis: true,
     link_import: true,

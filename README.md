@@ -8,8 +8,9 @@ vocals, drums, bass and other stems; and export chord sheets as PDF or images.
 The user application is a mobile-friendly React and TypeScript single-page app
 built with Vite and Capacitor. Users register with email and password; account
 records and sessions are stored in SQLite. Songs, settings and imported audio
-remain in on-device browser storage. Audio analysis runs locally by default,
-with ChordMini available as an optional server-assisted engine.
+remain in on-device browser storage. Chord recognition uses the optional
+TensorFlow model hosted by the Python API, with on-device analysis as a fallback.
+ChordMini remains available as an optional remote analysis engine.
 
 The administrator console is a separate web application at `/admin/`. Both
 frontends use the independently running Python FastAPI service; no TypeScript
@@ -22,8 +23,10 @@ is separate and required on each fresh console page load.
 1. Import an audio file or record audio from the microphone. A YouTube or Spotify
 	link imports track metadata only; those services do not provide downloadable
 	audio through this app.
-2. ChordLab tries ChordMini for beat and chord recognition when enabled. If it
-	is unavailable, Web Audio analysis estimates the chords on the device.
+2. ChordLab tries the locally hosted TensorFlow chord recognizer when enabled.
+	If it has not been trained or is unavailable, ChordMini and then Web Audio
+	analysis can provide fallbacks. ChordMini is also an optional alternative
+	engine.
 3. Optional API requests look up chord diagrams, track lyrics and link metadata.
 	Romanization uses the configured AI provider, with an offline Tanglish
 	fallback for Tamil text.
@@ -31,7 +34,7 @@ is separate and required on each fresh console page load.
 	sheet, and exported. Studio stem separation runs Demucs in the Python API.
 
 The API backend is Python with FastAPI. It provides `/api/auth/register`,
-`/api/auth/login`, `/api/auth/logout`, `/api/chordmini`,
+`/api/auth/login`, `/api/auth/logout`, `/api/chord-model`, `/api/chordmini`,
 `/api/chords`, `/api/separate`, `/api/import-link`, `/api/lyrics`,
 `/api/romanize`, `/api/public-config`, and protected `/api/admin/*` settings and
 health routes. The admin console can pause analysis engines and features,
@@ -49,6 +52,36 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -r backend/requirements.txt
 ```
+
+To train and use the TensorFlow chord model, install its optional dependencies
+and download GuitarSet:
+
+```sh
+pip install -r backend/requirements-ml.txt
+python -m backend.train_chord_model --download
+```
+
+For a quick baseline, run
+`python -m backend.train_chord_model --max-groups 12 --epochs 5`. The full
+dataset command above trains on all available song groups. Both modes keep
+validation recordings separate by song group and report held-out accuracy.
+Training outputs the `.keras` model and matching `.labels.json` file to
+`backend/data/`.
+
+The training command downloads GuitarSet's mono microphone audio and chord
+annotations from [Zenodo](https://zenodo.org/records/3371780) (about 696 MB),
+verifies their checksums, and stores the dataset and resulting model under
+`backend/data/`, which is git-ignored. GuitarSet is released under CC BY 4.0;
+cite Xi et al., *GuitarSet: A Dataset for Guitar Transcription*, ISMIR 2018, if
+you use it. To train from an already extracted copy, pass `--data-dir PATH`
+without `--download`. Training keeps validation recordings separate from
+training recordings. The included initial baseline was trained on all 30 song
+groups for 6 epochs and reached 32.6% held-out chord accuracy; retrain it with
+more epochs and evaluate it on your own recordings before relying on it. The
+dataset is guitar-focused, so results may not generalize to other instruments
+or recording styles. ChordLab does not train on users' local audio or scrape
+copyrighted recordings; audio without aligned chord labels is not suitable
+supervised training data.
 
 Start the FastAPI backend in one terminal:
 
@@ -77,10 +110,12 @@ separate origins.
 When preparing a requested "commit everything", review and update this README
 to match the current project features and setup before committing.
 
-Set `ADMIN_PASSWORD` on the FastAPI server before the first admin sign-in. The
-admin username defaults to `jebin` and can be changed with `ADMIN_USERNAME`.
-On first authentication, FastAPI creates the administrator in
-`backend/data/chordlab.sqlite3` and stores a salted password hash. User passwords
+Set `ADMIN_PASSWORD` in the private root `.env` file or FastAPI server
+environment before the first admin account is created. The admin username
+defaults to `jebin` and can be changed with `ADMIN_USERNAME`. FastAPI seeds the
+administrator in `backend/data/chordlab.sqlite3` on first startup when those
+values are set, and stores a salted password hash. Changing the environment
+password later does not overwrite an existing admin account. User passwords
 are also salted and hashed. Keep `.env` private; neither admin credentials nor
 passwords should be exposed as `VITE_` variables. The admin console holds its
 session in memory only, so reopening or refreshing `/admin/` requires signing in.
@@ -98,6 +133,7 @@ FastAPI loads the root `.env` file. Relevant settings:
 | `CORS_ORIGINS` | Comma-separated allowed web and Capacitor origins. |
 | `CHORDMINI_API_URL` | ChordMini service URL; defaults to `https://chordmini.me`. |
 | `CHORDMINI_APP_CHECK_TOKEN` | Optional token for the public ChordMini service. |
+| `CHORD_MODEL_PATH` | Optional path to the trained `.keras` model; the matching label file uses the same path with `.labels.json`. |
 | `CHORDS_API_URL` | Chord catalog API base URL. |
 | `AI_API_BASE_URL` | OpenAI-compatible API base URL for lyric romanization. |
 | `AI_API_KEY` | Server-side key for the configured AI provider. |

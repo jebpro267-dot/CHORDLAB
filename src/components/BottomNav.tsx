@@ -58,7 +58,10 @@ function isFeatureEnabled(
   features: ReturnType<typeof useAppSettings>["settings"]["features"],
 ) {
   if (section === "analyze")
-    return features.song_analysis && (features.chordmini_analysis || features.local_analysis);
+    return (
+      features.song_analysis &&
+      (features.tensorflow_analysis || features.chordmini_analysis || features.local_analysis)
+    );
   if (section === "live") return features.live_detection;
   if (section === "chords") return features.chord_diagrams;
   if (section === "tuner") return features.tuner;

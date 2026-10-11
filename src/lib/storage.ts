@@ -20,7 +20,7 @@ export interface Song {
   transpose: number;
   notes: string;
   /** which engine produced the analysis */
-  engine?: "chordmini" | "local";
+  engine?: "tensorflow" | "chordmini" | "local";
   /** ChordMini models used, when engine === "chordmini" */
   models?: { beatModel: string; chordModel: string };
   /** time-synced lyric lines (LRCLIB), used for exact chord placement */

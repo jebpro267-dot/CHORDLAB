@@ -102,6 +102,7 @@ class AdminCredentials(BaseModel):
 
 class FeatureFlags(BaseModel):
     song_analysis: bool = True
+    tensorflow_analysis: bool = True
     chordmini_analysis: bool = True
     local_analysis: bool = True
     link_import: bool = True
@@ -439,6 +440,10 @@ async def _probe_service(client: httpx.AsyncClient, name: str, url: str) -> dict
 async def admin_health() -> dict:
     settings = load_app_settings()
     checks = [{"name": "ChordLab API", "status": "healthy", "detail": "API process is responding"}]
+    if settings.features.tensorflow_analysis:
+        from backend.chord_model import model_status
+
+        checks.append(model_status())
     async with httpx.AsyncClient(timeout=3) as client:
         probes = []
         if settings.features.chordmini_analysis:
@@ -493,6 +498,32 @@ async def chordmini(
         return {"ok": False, "reason": "ChordMini timed out"}
     except Exception as error:
         return {"ok": False, "reason": f"ChordMini could not analyse this audio: {error}"}
+
+
+@app.post("/api/chord-model", dependencies=[Depends(require_user)])
+async def chord_model(file: UploadFile = File(...)) -> dict:
+    require_feature("song_analysis")
+    require_feature("tensorflow_analysis")
+    audio = await file.read(MAX_ANALYSIS_BYTES + 1)
+    if not audio:
+        raise HTTPException(400, "Audio file is empty")
+    if len(audio) > MAX_ANALYSIS_BYTES:
+        raise HTTPException(413, "Audio file is larger than 20 MB")
+
+    from backend.chord_model import analyze_audio
+
+    try:
+        analysis = await run_in_threadpool(analyze_audio, audio)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(503, str(error)) from error
+    return {
+        "ok": True,
+        "beats": {},
+        "chords": {"results": analysis["chords"]},
+        "models": {"chordModel": "chordlab-cnn-v1"},
+    }
 
 
 def _note_id(root: str) -> str:

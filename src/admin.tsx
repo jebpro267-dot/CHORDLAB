@@ -33,9 +33,14 @@ const featureLabels: { key: keyof AppSettings["features"]; label: string; detail
     detail: "Allow users to open the song analysis workflow.",
   },
   {
+    key: "tensorflow_analysis",
+    label: "TensorFlow chord model",
+    detail: "Run the trained ChordLab model in the Python API.",
+  },
+  {
     key: "chordmini_analysis",
     label: "ChordMini analysis",
-    detail: "Remote beat tracking and chord recognition.",
+    detail: "Optional remote beat tracking and chord recognition.",
   },
   {
     key: "local_analysis",

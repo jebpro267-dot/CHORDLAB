@@ -1,12 +1,8 @@
-import { backendFetch } from "./backend";
+import { backendFetch, backendJson } from "./backend";
 
 /**
- * Adapter for the ChordMini API (beat tracking + chord recognition).
- *
- * The browser posts the audio file to our own /api/chordmini proxy, which
- * forwards it to the ChordMini backend. Whatever comes back is normalised into
- * the same `AnalysisResult` shape the on-device engine produces, so the chord
- * sheet, transposition, diagrams and exports work unchanged.
+ * Adapters for the TensorFlow and ChordMini analysis APIs.
+ * Both normalize results to the on-device `AnalysisResult` shape.
  */
 
 import type { AnalysisResult, ChordEvent } from "./audio-analysis";
@@ -250,7 +246,7 @@ export function toAnalysisResult(
 ): AnalysisResult {
   const { beats, downbeats } = parseBeats(beatsPayload);
   const chords = parseChords(chordsPayload);
-  if (chords.length === 0) throw new Error("ChordMini returned no chords");
+  if (chords.length === 0) throw new Error("Chord analysis returned no chord segments");
 
   const gap = medianInterval(beats);
   const reportedBpm = firstNumber(beatsPayload, ["bpm", "tempo", "BPM", "estimated_bpm"]);
@@ -343,5 +339,34 @@ export async function analyzeWithChordMini(
   } catch (error) {
     console.error(error);
     return { ok: false, reason: "Could not reach ChordMini" };
+  }
+}
+
+export type TensorFlowOutcome =
+  { ok: true; analysis: AnalysisResult } | { ok: false; reason: string };
+
+export async function analyzeWithTensorFlow(
+  file: File,
+  duration: number,
+): Promise<TensorFlowOutcome> {
+  const body = new FormData();
+  body.append("file", file, file.name || "audio");
+  try {
+    const json = await backendJson<Json>("/api/chord-model", {
+      method: "POST",
+      body,
+    });
+    const analysis = toAnalysisResult(
+      (json["beats"] ?? {}) as Json,
+      (json["chords"] ?? {}) as Json,
+      duration,
+    );
+    return { ok: true, analysis };
+  } catch (error) {
+    console.error(error);
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : "TensorFlow chord analysis failed",
+    };
   }
 }
