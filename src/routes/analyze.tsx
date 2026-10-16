@@ -15,7 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { analyzeAudioBuffer, type AnalysisResult } from "@/lib/audio-analysis";
+import { analyzeAudioBuffer, type ACRLanguage, type AnalysisResult } from "@/lib/audio-analysis";
 import { putAudio } from "@/lib/audio-store";
 import { analyzeWithChordMini, analyzeWithTensorFlow, type ChordMiniModels } from "@/lib/chordmini";
 import { importLink } from "@/lib/link-import.functions";
@@ -59,6 +59,7 @@ function AnalyzePage() {
   const [lyrics, setLyrics] = useState("");
   const [synced, setSynced] = useState<SyncedLine[]>([]);
   const [style, setStyle] = useState<Style>("auto");
+  const [acrLanguage, setAcrLanguage] = useState<ACRLanguage>("auto");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState("");
@@ -216,9 +217,9 @@ function AnalyzePage() {
       let models: ChordMiniModels | undefined;
 
       if (selectedEngine === "tensorflow" && settings.features.tensorflow_analysis) {
-        setStage("Analysing with your TensorFlow model");
+        setStage(`Analysing with your TensorFlow model (${acrLanguage})`);
         setProgress(15);
-        const outcome = await analyzeWithTensorFlow(file, decoded.duration);
+        const outcome = await analyzeWithTensorFlow(file, decoded.duration, acrLanguage);
         if (outcome.ok) {
           analysis = outcome.analysis;
           engine = "tensorflow";
@@ -287,6 +288,7 @@ function AnalyzePage() {
         const mono = await off.startRendering();
 
         analysis = await analyzeAudioBuffer(mono, {
+          language: acrLanguage,
           onProgress: (p, s) => {
             setProgress(Math.min(85, p * 0.85));
             setStage(s);
@@ -340,12 +342,13 @@ function AnalyzePage() {
         ...(syncedLines.length ? { syncedLyrics: syncedLines } : {}),
       });
       setProgress(100);
+      const usedLang = analysis.language || (acrLanguage !== "auto" ? acrLanguage : "detected");
       toast.success(
         engine === "tensorflow"
-          ? "Analysed with your TensorFlow model"
+          ? `Analysed with TensorFlow (${usedLang} model)`
           : engine === "chordmini"
             ? "Analysed with ChordMini"
-            : "Analysis complete (on device)",
+            : `Analysis complete on device (${usedLang} profile)`,
       );
       void navigate({ to: "/song/$id", params: { id } });
     } catch (e) {
@@ -481,6 +484,33 @@ function AnalyzePage() {
               ? "ChordMini provides remote beat and chord recognition; on-device analysis is used if it is unavailable."
               : "Everything runs on your device — your audio never leaves the phone."}
         </p>
+
+        <div className="mt-4 border-t border-border/60 pt-3">
+          <Label className="text-xs font-medium">Musical language &amp; chord profile</Label>
+          <Select
+            value={acrLanguage}
+            onValueChange={(v) => {
+              const lang = v as ACRLanguage;
+              setAcrLanguage(lang);
+              if (lang === "hindi" && style === "auto") setStyle("hinglish");
+              else if (lang === "tamil" && style === "auto") setStyle("tanglish");
+              else if (lang === "english" && style === "auto") setStyle("english");
+            }}
+          >
+            <SelectTrigger className="mt-1.5">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">Auto detect (English · Hindi · Tamil)</SelectItem>
+              <SelectItem value="english">English · Western pop / rock / classical</SelectItem>
+              <SelectItem value="hindi">Hindi · Bollywood / Hindustani raga idioms</SelectItem>
+              <SelectItem value="tamil">Tamil · Kollywood / Carnatic &amp; mediant harmony</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            Applies specialized chord transition matrices and key profiles to both the TensorFlow model and the in-system engine.
+          </p>
+        </div>
       </div>
 
       <div className="panel mt-4 p-4">

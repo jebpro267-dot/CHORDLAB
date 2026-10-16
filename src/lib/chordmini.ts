@@ -5,7 +5,7 @@ import { backendFetch, backendJson } from "./backend";
  * Both normalize results to the on-device `AnalysisResult` shape.
  */
 
-import type { AnalysisResult, ChordEvent } from "./audio-analysis";
+import type { ACRLanguage, AnalysisResult, ChordEvent } from "./audio-analysis";
 import { noteToPc, pcToNote } from "./chords";
 
 export interface ChordMiniModels {
@@ -364,6 +364,9 @@ export function toAnalysisResult(
   });
 
   const key = estimateKeyFromChords(chords);
+  const langRaw = (chordsPayload["language"] ?? beatsPayload["language"]) as string | undefined;
+  const language: "english" | "hindi" | "tamil" | undefined =
+    langRaw === "english" || langRaw === "hindi" || langRaw === "tamil" ? langRaw : undefined;
 
   return {
     duration: total,
@@ -375,6 +378,7 @@ export function toAnalysisResult(
     timeSignature: Math.round(timeSignature),
     chords,
     beatChords,
+    ...(language ? { language } : {}),
   };
 }
 
@@ -453,9 +457,11 @@ export type TensorFlowOutcome =
 export async function analyzeWithTensorFlow(
   file: File,
   duration: number,
+  language: ACRLanguage = "auto",
 ): Promise<TensorFlowOutcome> {
   const body = new FormData();
   body.append("file", file, file.name || "audio");
+  body.append("language", language);
   try {
     const json = await backendJson<Json>("/api/chord-model", {
       method: "POST",

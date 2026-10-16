@@ -22,164 +22,87 @@ from backend.chord_model import (
     WINDOW_FRAMES,
     chord_label_id,
 )
+from backend.dataset_collector import (
+    ENGLISH_PROGRESSIONS,
+    HINDI_PROGRESSIONS,
+    TAMIL_PROGRESSIONS,
+    build_and_save_dataset,
+    download_file,
+    safe_extract_zip,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
-TRAIN_STRIDE_FRAMES = 44
+TRAIN_STRIDE_FRAMES = 11  # Matches inference window stride for exact alignment
 GUITARSET_URLS = {
     "annotation.zip": (
         "https://zenodo.org/api/records/3371780/files/annotation.zip/content",
         "b39b78e63d3446f2e54ddb7a54df9b10",
     ),
-    "audio_mono-mic.zip": (
-        "https://zenodo.org/api/records/3371780/files/audio_mono-mic.zip/content",
-        "275966d6610ac34999b58426beb119c3",
-    ),
 }
 
 
-def download(url: str, target: Path, expected_md5: str) -> None:
-    """Download a remote dataset file with MD5 checksum verification and progress logging.
-
-    Streams chunks of 1 MiB to a temporary `.part` file, verifies the computed MD5 digest
-    against `expected_md5`, and atomically replaces the target path once verified.
-
-    Args:
-        url: Remote HTTP(S) URL of the dataset archive to download.
-        target: Local file destination Path where the verified archive should reside.
-        expected_md5: Expected 32-character hexadecimal MD5 hash string.
-
-    Raises:
-        RuntimeError: If MD5 verification fails after download completes.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists() and _md5(target) == expected_md5:
-        print(f"Already downloaded and verified {target.name}")
-        return
-    partial = target.with_suffix(target.suffix + ".part")
-    digest = hashlib.md5()
-    request = urllib.request.Request(url, headers={"User-Agent": "ChordLab/1.0"})
-    print(f"Downloading {target.name}")
-    with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as output:
-        total = int(response.headers.get("Content-Length", 0))
-        received = 0
-        while chunk := response.read(1024 * 1024):
-            output.write(chunk)
-            digest.update(chunk)
-            received += len(chunk)
-            if total:
-                print(f"\r  {received * 100 // total}% ({received // 1024**2} MiB)", end="", flush=True)
-    print()
-    if digest.hexdigest() != expected_md5:
-        partial.unlink(missing_ok=True)
-        raise RuntimeError(f"Checksum verification failed for {target.name}")
-    partial.replace(target)
-
-
-def _md5(path: Path) -> str:
-    """Calculate the MD5 checksum of a file in 1 MiB stream buffers.
-
-    Args:
-        path: Path to the target file on disk.
-
-    Returns:
-        str: Hexadecimal string representation of the MD5 hash.
-    """
-    digest = hashlib.md5()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def safe_extract(archive_path: Path, destination: Path) -> None:
-    """Extract a ZIP archive preventing Zip Slip directory traversal vulnerabilities.
-
-    Validates that each member file's relative target resides strictly within the
-    intended `destination` folder before extraction.
-
-    Args:
-        archive_path: Path to the ZIP archive to unpack.
-        destination: Path to destination extraction directory.
-
-    Raises:
-        RuntimeError: If any path inside the archive attempts to escape the root directory.
-    """
-    destination.mkdir(parents=True, exist_ok=True)
-    root = destination.resolve()
-    with zipfile.ZipFile(archive_path) as archive:
-        for member in archive.infolist():
-            relative = PurePosixPath(member.filename)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise RuntimeError(f"Unsafe path in dataset archive: {member.filename}")
-            target = (destination / Path(*relative.parts)).resolve()
-            if root not in target.parents and target != root:
-                raise RuntimeError(f"Unsafe path in dataset archive: {member.filename}")
-            if member.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, target.open("wb") as output:
-                shutil.copyfileobj(source, output)
-
-
 def download_guitarset(data_dir: Path) -> None:
-    """Fetch and extract the GuitarSet dataset annotations and microphone audio tracks.
-
-    Downloads both `annotation.zip` and `audio_mono-mic.zip` from Zenodo and safely
-    unpacks them into `data_dir`.
-
-    Args:
-        data_dir: Destination directory path for the GuitarSet data files.
-    """
+    """Fetch and extract GuitarSet annotations from Zenodo."""
     raw_dir = data_dir / "downloads"
     for filename, (url, checksum) in GUITARSET_URLS.items():
         archive = raw_dir / filename
-        download(url, archive, checksum)
-        safe_extract(archive, data_dir)
+        download_file(url, archive, checksum)
+        safe_extract_zip(archive, data_dir)
 
 
 def _quality_labels() -> list[str]:
-    """Generate the complete list of chord label class names including 'N' (no chord).
-
-    Builds classes for all 12 pitch chroma roots combined with major, minor, and seventh qualities.
-
-    Returns:
-        list[str]: Complete ordered list of chord label strings (e.g. ['N', 'C', 'C:min', ...]).
-    """
+    """Generate the complete list of 109 chord label class names including 'N' (no chord)."""
     return ["N"] + [
         pitch + quality for pitch in PITCH_NAMES for quality in QUALITIES
     ]
 
 
 def _windows_for_track(audio_path: Path, annotation_path: Path) -> tuple[Any, Any]:
-    """Extract sliding 12-semitone chroma feature windows and corresponding chord labels for an audio track.
-
-    Reads JAMS chord annotations, computes normalized 12-bin STFT chromagram,
-    pads the edges, slices temporal windows of size `WINDOW_FRAMES`, and maps
-    ground-truth chord labels to integer class IDs.
-
-    Args:
-        audio_path: Path to the audio file (WAV or FLAC).
-        annotation_path: Path to the corresponding JAMS annotation file.
-
-    Returns:
-        tuple[Any, Any]: (windows_tensor, labels_array) where windows is shaped (N, WINDOW_FRAMES, 12, 1)
-            and labels is shaped (N,).
+    """Extract sliding 12-semitone chroma feature windows and corresponding chord labels.
+    Supports both JAMS (*.jams) and JSON (*.json) annotation files.
     """
     import librosa
     import numpy as np
 
-    with annotation_path.open(encoding="utf-8") as source:
-        jams = json.load(source)
-    chord_annotations = [
-        annotation
-        for annotation in jams.get("annotations", [])
-        if annotation.get("namespace") == "chord"
-    ]
-    if not chord_annotations:
+    events = []
+    if annotation_path.suffix.lower() == ".jams":
+        with annotation_path.open(encoding="utf-8") as source:
+            jams = json.load(source)
+        chord_annotations = [
+            ann for ann in jams.get("annotations", [])
+            if ann.get("namespace") == "chord"
+        ]
+        if not chord_annotations:
+            return np.empty((0, WINDOW_FRAMES, 12, 1), np.float32), np.empty((0,), np.int32)
+        for e in chord_annotations[-1].get("data", []):
+            events.append({
+                "time": float(e.get("time", 0)),
+                "duration": float(e.get("duration", 0)),
+                "value": str(e.get("value", "")),
+            })
+    else:  # .json
+        with annotation_path.open(encoding="utf-8") as source:
+            data = json.load(source)
+        for e in data.get("events", []):
+            start_t = float(e.get("start", e.get("time", 0)))
+            end_t = float(e.get("end", start_t + float(e.get("duration", 0))))
+            events.append({
+                "time": start_t,
+                "duration": max(0.01, end_t - start_t),
+                "value": str(e.get("chord", e.get("value", ""))),
+            })
+
+    if not events:
         return np.empty((0, WINDOW_FRAMES, 12, 1), np.float32), np.empty((0,), np.int32)
 
-    samples, _ = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
+    try:
+        samples, _ = librosa.load(audio_path, sr=SAMPLE_RATE, mono=True)
+    except Exception:
+        import soundfile as sf
+        samples, _ = sf.read(str(audio_path), dtype="float32", always_2d=False)
+        if samples.ndim > 1:
+            samples = np.mean(samples, axis=1)
+
     chroma = librosa.feature.chroma_stft(
         y=samples,
         sr=SAMPLE_RATE,
@@ -188,141 +111,146 @@ def _windows_for_track(audio_path: Path, annotation_path: Path) -> tuple[Any, An
         tuning=0,
         norm=2,
     ).T
+
     half = WINDOW_FRAMES // 2
     padded = np.pad(chroma, ((half, half), (0, 0)), mode="reflect")
     windows: list[Any] = []
     labels: list[int] = []
-    annotation = chord_annotations[-1]
-    for event in annotation.get("data", []):
-        label_id = chord_label_id(str(event.get("value", "")))
-        if label_id is None:
-            continue
-        start_frame = max(0, int(float(event.get("time", 0)) / (HOP_LENGTH / SAMPLE_RATE)))
-        end_frame = min(
-            len(chroma),
-            int((float(event.get("time", 0)) + float(event.get("duration", 0))) / (HOP_LENGTH / SAMPLE_RATE)),
-        )
-        if end_frame - start_frame < WINDOW_FRAMES:
-            continue
-        for center in range(
-            start_frame + half, end_frame - half + 1, TRAIN_STRIDE_FRAMES
-        ):
-            start = center
-            windows.append(padded[start : start + WINDOW_FRAMES])
+
+    hop_time = HOP_LENGTH / SAMPLE_RATE
+    for start_f in range(0, len(chroma), TRAIN_STRIDE_FRAMES):
+        t = start_f * hop_time
+        chord_val = "N"
+        for ev in events:
+            if ev["time"] <= t < ev["time"] + ev["duration"]:
+                chord_val = ev["value"]
+                break
+        label_id = chord_label_id(chord_val)
+        if label_id is not None:
+            windows.append(padded[start_f : start_f + WINDOW_FRAMES])
             labels.append(label_id)
+
     if not windows:
         return np.empty((0, WINDOW_FRAMES, 12, 1), np.float32), np.empty((0,), np.int32)
     return np.asarray(windows, dtype=np.float32)[..., np.newaxis], np.asarray(labels, dtype=np.int32)
 
 
 def build_model(num_labels: int) -> Any:
-    """Construct and compile the 2D Convolutional Neural Network (CNN) for chord classification.
-
-    Architecture:
-    1. Input layer: (WINDOW_FRAMES, 12 pitch classes, 1 channel)
-    2. Conv2D (32 filters, 5x3 kernel, ReLU) + MaxPooling2D (2, 1)
-    3. Conv2D (64 filters, 5x3 kernel, ReLU) + MaxPooling2D (2, 1)
-    4. Conv2D (96 filters, 3x3 kernel, ReLU)
-    5. GlobalAveragePooling2D
-    6. Dense (128 units, ReLU) + Dropout (0.35)
-    7. Softmax output layer with `num_labels` classes
-
-    Args:
-        num_labels: Total number of chord classes.
-
-    Returns:
-        tf.keras.Model: Compiled Keras model ready for training with Adam optimizer.
-    """
+    """Construct and compile the 2D Convolutional Neural Network (CNN) for chord classification."""
     import tensorflow as tf
 
     inputs = tf.keras.Input(shape=(WINDOW_FRAMES, 12, 1))
     x = tf.keras.layers.Conv2D(32, (5, 3), padding="same", activation="relu")(inputs)
     x = tf.keras.layers.MaxPooling2D((2, 1))(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+
     x = tf.keras.layers.Conv2D(64, (5, 3), padding="same", activation="relu")(x)
     x = tf.keras.layers.MaxPooling2D((2, 1))(x)
+    x = tf.keras.layers.Dropout(0.25)(x)
+
     x = tf.keras.layers.Conv2D(96, (3, 3), padding="same", activation="relu")(x)
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Flatten()(x)
+
     x = tf.keras.layers.Dense(128, activation="relu")(x)
-    x = tf.keras.layers.Dropout(0.35)(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
     outputs = tf.keras.layers.Dense(num_labels, activation="softmax")(x)
+
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
-        loss="sparse_categorical_crossentropy",
-        metrics=["accuracy"],
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(),
+        metrics=[tf.keras.metrics.SparseCategoricalAccuracy(name="accuracy")],
     )
     return model
 
 
-def train(data_dir: Path, epochs: int, seed: int, max_groups: int | None) -> None:
-    """Execute end-to-end training pipeline for the ChordLab CNN model.
+def ensure_datasets(data_dir: Path, download_guitar: bool = False) -> None:
+    """Ensure English, Hindi, and Tamil datasets exist under data_dir."""
+    datasets_root = data_dir / "datasets"
+    en_dir = datasets_root / "english"
+    hi_dir = datasets_root / "hindi"
+    ta_dir = datasets_root / "tamil"
 
-    Pipeline steps:
-    1. Discovers and pairs GuitarSet audio recordings with JAMS chord ground-truth.
-    2. Organizes dataset into song groups and creates held-out group validation splits.
-    3. Extracts chroma feature windows.
-    4. Applies pitch-shift data augmentation (-2 and +2 semitone roll on the pitch axis).
-    5. Computes inverse-frequency class weights to address chord distribution imbalances.
-    6. Trains CNN model with EarlyStopping and ReduceLROnPlateau callbacks.
-    7. Evaluates held-out validation accuracy and saves `.keras` model and labels JSON.
+    if download_guitar:
+        try:
+            download_guitarset(data_dir / "guitarset")
+        except Exception as e:
+            print("GuitarSet download note:", e)
 
-    Args:
-        data_dir: Path to extracted GuitarSet directory containing JAMS annotations and audio.
-        epochs: Maximum number of training epochs.
-        seed: Random seed for deterministic reproducibility.
-        max_groups: Optional limit on the number of song groups to train on for quick prototyping.
+    if not (en_dir / "audio").exists() or not list((en_dir / "audio").glob("*.wav")):
+        build_and_save_dataset(en_dir, "english", ENGLISH_PROGRESSIONS, num_tracks=30)
 
-    Raises:
-        RuntimeError: If insufficient tracks or data files are found.
-        ValueError: If max_groups is less than 2.
-    """
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    if not (hi_dir / "audio").exists() or not list((hi_dir / "audio").glob("*.wav")):
+        build_and_save_dataset(hi_dir, "hindi", HINDI_PROGRESSIONS, num_tracks=35)
+
+    if not (ta_dir / "audio").exists() or not list((ta_dir / "audio").glob("*.wav")):
+        build_and_save_dataset(ta_dir, "tamil", TAMIL_PROGRESSIONS, num_tracks=35)
+
+
+def gather_tracks_for_language(data_dir: Path, language: str) -> list[tuple[Path, Path, str]]:
+    """Discover matched audio and annotation pairs for a given language."""
+    datasets_root = data_dir / "datasets"
+    matched: list[tuple[Path, Path, str]] = []
+
+    target_dirs = []
+    if language in ("english", "all"):
+        target_dirs.append((datasets_root / "english", "en"))
+        guitarset_dir = data_dir / "guitarset"
+        if guitarset_dir.is_dir():
+            target_dirs.append((guitarset_dir, "guitarset"))
+    if language in ("hindi", "all"):
+        target_dirs.append((datasets_root / "hindi", "hi"))
+    if language in ("tamil", "all"):
+        target_dirs.append((datasets_root / "tamil", "ta"))
+
+    for search_dir, group_prefix in target_dirs:
+        if not search_dir.is_dir():
+            continue
+        ann_files = {p.stem: p for p in search_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".jams", ".json"}}
+        audio_files = {
+            p.stem.removesuffix("_mic"): p
+            for p in search_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in {".wav", ".flac"}
+        }
+        for stem, ann_path in ann_files.items():
+            if stem in audio_files:
+                group = f"{group_prefix}_{stem.split('_')[0]}"
+                matched.append((ann_path, audio_files[stem], group))
+
+    return matched
+
+
+def train_single_model(
+    matched: list[tuple[Path, Path, str]],
+    model_save_path: Path,
+    labels_save_path: Path,
+    epochs: int = 15,
+    seed: int = 42,
+    model_name: str = "Master",
+) -> float:
+    """Train a CNN chord model on the provided track pairs and save to disk."""
     import numpy as np
     import tensorflow as tf
 
-    tf.config.threading.set_intra_op_parallelism_threads(1)
-    tf.config.threading.set_inter_op_parallelism_threads(1)
     random.seed(seed)
     np.random.seed(seed)
     tf.keras.utils.set_random_seed(seed)
-    annotation_files = sorted(data_dir.rglob("*.jams"))
-    audio_files = {
-        path.stem.removesuffix("_mic"): path
-        for path in data_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".wav", ".flac"}
-    }
-    if not annotation_files or not audio_files:
-        raise RuntimeError(
-            f"No GuitarSet audio and annotations found under {data_dir}; "
-            "run with --download or place the extracted dataset there"
-        )
 
-    matched = [
-        (annotation, audio_files[annotation.stem], annotation.stem[3:].rsplit("_", 1)[0])
-        for annotation in annotation_files
-        if annotation.stem in audio_files
-    ]
-    group_names = sorted({group for _, _, group in matched})
-    available_group_count = len(group_names)
-    if max_groups is not None:
-        if max_groups < 2:
-            raise ValueError("--max-groups must be at least 2 for a held-out validation split")
-        random.Random(seed).shuffle(group_names)
-        selected_groups = set(group_names[:max_groups])
-        matched = [item for item in matched if item[2] in selected_groups]
-        print(f"Using {len(selected_groups)} of {available_group_count} song groups")
+    print(f"\n=======================================================")
+    print(f"Training {model_name} Chord Model on {len(matched)} tracks...")
+    print(f"=======================================================")
 
     tracks: dict[str, list[tuple[Any, Any]]] = {}
     for index, (annotation, audio_path, group) in enumerate(matched, start=1):
-        print(f"\rPreparing track {index}/{len(matched)}: {annotation.stem}", end="", flush=True)
         track_windows, track_labels = _windows_for_track(audio_path, annotation)
         if len(track_labels):
             tracks.setdefault(group, []).append((track_windows, track_labels))
-    print()
+
     if len(tracks) < 2:
-        raise RuntimeError("At least two annotated GuitarSet tracks with matching audio are required")
+        # Group fallback if only 1 group
+        all_items = [t for g in tracks for t in tracks[g]]
+        group_names = [f"g_{i}" for i in range(len(all_items))]
+        tracks = {group_names[i]: [all_items[i]] for i in range(len(all_items))}
 
     group_names = list(tracks)
     random.Random(seed).shuffle(group_names)
@@ -331,16 +259,16 @@ def train(data_dir: Path, epochs: int, seed: int, max_groups: int | None) -> Non
     training_groups = group_names[validation_count:]
 
     def combine(groups: list[str]) -> tuple[Any, Any]:
-        """Concatenate all feature windows and labels across the given song groups."""
         items = [track for group in groups for track in tracks[group]]
         return np.concatenate([item[0] for item in items]), np.concatenate([item[1] for item in items])
 
     train_x, train_y = combine(training_groups)
     validation_x, validation_y = combine(validation_groups)
 
+    # Pitch-shift data augmentation across all 12 semitones
     augmented_x = [train_x]
     augmented_y = [train_y]
-    for shift in (-2, 2):
+    for shift in range(1, 12):
         augmented_x.append(np.roll(train_x, shift, axis=2))
         roots = np.where(train_y == 0, 0, (train_y - 1) // len(QUALITIES))
         families = np.where(train_y == 0, 0, (train_y - 1) % len(QUALITIES))
@@ -350,70 +278,97 @@ def train(data_dir: Path, epochs: int, seed: int, max_groups: int | None) -> Non
         )
     train_x = np.concatenate(augmented_x)
     train_y = np.concatenate(augmented_y)
-    labels = _quality_labels()
-    class_counts = np.bincount(train_y, minlength=len(labels))
-    class_weights = {
-        class_id: min(5.0, float(np.sqrt(len(train_y) / (len(labels) * count))))
-        for class_id, count in enumerate(class_counts)
-        if count
-    }
 
+    # Augment validation across all 12 semitones to evaluate key invariance
+    val_aug_x = [validation_x]
+    val_aug_y = [validation_y]
+    for shift in range(1, 12):
+        val_aug_x.append(np.roll(validation_x, shift, axis=2))
+        roots = np.where(validation_y == 0, 0, (validation_y - 1) // len(QUALITIES))
+        families = np.where(validation_y == 0, 0, (validation_y - 1) % len(QUALITIES))
+        shifted_roots = (roots + shift) % 12
+        val_aug_y.append(
+            np.where(validation_y == 0, 0, 1 + shifted_roots * len(QUALITIES) + families).astype(np.int32)
+        )
+    validation_x = np.concatenate(val_aug_x)
+    validation_y = np.concatenate(val_aug_y)
+
+    labels = _quality_labels()
     model = build_model(len(labels))
     callbacks = [
-        tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=7, restore_best_weights=True
-        ),
-        tf.keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.5, patience=3, min_lr=0.00005
-        ),
+        tf.keras.callbacks.EarlyStopping(monitor="val_accuracy", patience=5, restore_best_weights=True),
+        tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=0.00005),
     ]
+
+    print(f"Training data: {len(train_x)} windows, Validation: {len(validation_x)} windows.")
     model.fit(
         train_x,
         train_y,
         validation_data=(validation_x, validation_y),
         epochs=epochs,
-        batch_size=128,
-        class_weight=class_weights,
+        batch_size=64,
         callbacks=callbacks,
-        verbose=2,
+        verbose=1,
     )
+
     loss, accuracy = model.evaluate(validation_x, validation_y, verbose=0)
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary_model = MODEL_PATH.with_name(MODEL_PATH.stem + ".tmp.keras")
-    model.save(temporary_model)
-    temporary_model.replace(MODEL_PATH)
-    temporary_labels = LABELS_PATH.with_suffix(".tmp.json")
-    temporary_labels.write_text(json.dumps(labels), encoding="utf-8")
-    temporary_labels.replace(LABELS_PATH)
+    model_save_path.parent.mkdir(parents=True, exist_ok=True)
+    model.save(model_save_path)
+    labels_save_path.write_text(json.dumps(labels, indent=2), encoding="utf-8")
     print(
-        f"Saved {MODEL_PATH}; track-held-out validation accuracy={accuracy:.3f}, "
-        f"loss={loss:.3f} ({len(training_groups)} train / {len(validation_groups)} validation groups)"
+        f"[OK] Successfully saved {model_name} model to {model_save_path.name}\n"
+        f"  Held-out validation accuracy: {accuracy * 100:.2f}%, loss: {loss:.3f}"
     )
+    return accuracy
+
+
+def train_acr_models(data_dir: Path, epochs: int = 7, seed: int = 42, language: str = "all") -> None:
+    """Execute training for English, Hindi, Tamil, and Master TensorFlow chord recognition models."""
+    ensure_datasets(data_dir)
+
+    results = {}
+    if language in ("english", "all"):
+        matched_en = gather_tracks_for_language(data_dir, "english")
+        p_model = ROOT / "backend/data/chord_model_english.keras"
+        p_labels = p_model.with_suffix(".labels.json")
+        results["English"] = train_single_model(matched_en, p_model, p_labels, epochs=epochs, seed=seed, model_name="English")
+
+    if language in ("hindi", "all"):
+        matched_hi = gather_tracks_for_language(data_dir, "hindi")
+        p_model = ROOT / "backend/data/chord_model_hindi.keras"
+        p_labels = p_model.with_suffix(".labels.json")
+        results["Hindi"] = train_single_model(matched_hi, p_model, p_labels, epochs=epochs, seed=seed, model_name="Hindi")
+
+    if language in ("tamil", "all"):
+        matched_ta = gather_tracks_for_language(data_dir, "tamil")
+        p_model = ROOT / "backend/data/chord_model_tamil.keras"
+        p_labels = p_model.with_suffix(".labels.json")
+        results["Tamil"] = train_single_model(matched_ta, p_model, p_labels, epochs=epochs, seed=seed, model_name="Tamil")
+
+    if language == "all":
+        # Master multi-lingual unified model
+        matched_all = gather_tracks_for_language(data_dir, "all")
+        results["Master (Unified)"] = train_single_model(matched_all, MODEL_PATH, LABELS_PATH, epochs=epochs, seed=seed, model_name="Master (Unified)")
+
+    print("\n=======================================================")
+    print("All Requested TensorFlow ACR Models Trained Successfully!")
+    print("=======================================================")
+    for name, acc in results.items():
+        print(f"  * {name} ACR Model: {acc * 100:.2f}% accuracy")
 
 
 def main() -> None:
-    """CLI entry point for downloading dataset and launching chord recognizer model training."""
-    parser = argparse.ArgumentParser(description="Train ChordLab's TensorFlow chord recognizer")
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=ROOT / "backend/data/guitarset",
-        help="Directory for the extracted GuitarSet audio and annotation archives",
-    )
-    parser.add_argument("--download", action="store_true", help="Download GuitarSet from Zenodo (~700 MB)")
-    parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--max-groups",
-        type=int,
-        help="Use a reproducible subset of song groups for a faster initial training run",
-    )
+    parser = argparse.ArgumentParser(description="Train ChordLab's Multi-lingual TensorFlow Chord Models")
+    parser.add_argument("--data-dir", type=Path, default=ROOT / "backend/data", help="Directory for datasets")
+    parser.add_argument("--language", choices=["english", "hindi", "tamil", "all"], default="all", help="Target language")
+    parser.add_argument("--epochs", type=int, default=7, help="Number of training epochs")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--download", action="store_true", help="Download online datasets")
     args = parser.parse_args()
-    if args.epochs < 1:
-        parser.error("--epochs must be positive")
+
     if args.download:
-        download_guitarset(args.data_dir)
-    train(args.data_dir, args.epochs, args.seed, args.max_groups)
+        ensure_datasets(args.data_dir, download_guitar=True)
+    train_acr_models(args.data_dir, epochs=args.epochs, seed=args.seed, language=args.language)
 
 
 if __name__ == "__main__":

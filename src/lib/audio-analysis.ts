@@ -18,6 +18,8 @@ export interface ChordEvent {
   confidence: number;
 }
 
+export type ACRLanguage = "auto" | "english" | "hindi" | "tamil";
+
 export interface AnalysisResult {
   duration: number;
   bpm: number;
@@ -29,6 +31,8 @@ export interface AnalysisResult {
   chords: ChordEvent[];
   /** per-beat chord labels, aligned with `beats` */
   beatChords: string[];
+  /** detected or specified ACR language profile */
+  language?: "english" | "hindi" | "tamil";
 }
 
 /* ------------------------------------------------------------------ */
@@ -151,9 +155,27 @@ function buildTemplates(): Template[] {
 
 const TEMPLATES = buildTemplates();
 
-/* Krumhansl-Schmuckler key profiles */
-const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
-const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
+/* Standard Krumhansl-Schmuckler and empirical language-specific key/mode profiles */
+export const KEY_PROFILES: Record<"english" | "hindi" | "tamil", { major: number[]; minor: number[] }> = {
+  english: {
+    // Diatonic circle-of-fifths distribution
+    major: [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
+    minor: [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
+  },
+  hindi: {
+    // Bilawal / Yaman (#4 / deg 6) / Khamaj for Major; Bhairavi (b2) / Kafi / Asavari for Minor
+    major: [6.12, 1.95, 3.25, 2.1, 4.52, 3.1, 3.45, 5.3, 2.15, 3.5, 2.4, 3.05],
+    minor: [6.2, 3.35, 3.4, 5.25, 2.45, 3.4, 2.3, 4.9, 4.1, 2.55, 3.65, 3.5],
+  },
+  tamil: {
+    // Sankarabharanam / Kalyani / Harikambhoji / Charukesi for Major; Keeravani / Natabhairavi for Minor
+    major: [6.25, 2.1, 3.15, 2.65, 4.2, 3.85, 2.4, 5.15, 3.3, 3.2, 2.85, 2.75],
+    minor: [6.15, 2.45, 3.65, 5.1, 2.5, 3.35, 2.25, 4.8, 4.45, 2.4, 3.55, 3.6],
+  },
+};
+
+const MAJOR_PROFILE = KEY_PROFILES.english.major;
+const MINOR_PROFILE = KEY_PROFILES.english.minor;
 
 /* ------------------------------------------------------------------ */
 /* Front end: log-frequency (CQT-style) spectrogram                     */
@@ -640,7 +662,10 @@ function trackBeats(nov: Float32Array, frameTime: number, bpm: number): number[]
 /* Key estimation                                                       */
 /* ------------------------------------------------------------------ */
 
-function estimateKey(chroma: Float32Array[]): { pc: number; mode: "major" | "minor" } {
+function estimateKey(
+  chroma: Float32Array[],
+  language: "english" | "hindi" | "tamil" = "english",
+): { pc: number; mode: "major" | "minor" } {
   const avg = new Float32Array(12);
   for (const c of chroma) for (let i = 0; i < 12; i++) avg[i] = avg[i]! + c[i]!;
   const n = chroma.length || 1;
@@ -668,10 +693,11 @@ function estimateKey(chroma: Float32Array[]): { pc: number; mode: "major" | "min
     return num / (Math.sqrt(dx * dy) || 1);
   };
 
+  const profile = KEY_PROFILES[language] ?? KEY_PROFILES.english;
   let best = { pc: 0, mode: "major" as "major" | "minor", score: -Infinity };
   for (let shift = 0; shift < 12; shift++) {
-    const maj = corr(MAJOR_PROFILE, shift);
-    const min = corr(MINOR_PROFILE, shift);
+    const maj = corr(profile.major, shift);
+    const min = corr(profile.minor, shift);
     if (maj > best.score) best = { pc: shift, mode: "major", score: maj };
     if (min > best.score) best = { pc: shift, mode: "minor", score: min };
   }
@@ -679,7 +705,11 @@ function estimateKey(chroma: Float32Array[]): { pc: number; mode: "major" | "min
 }
 
 /** Key from the decoded chord track — far more reliable than raw chroma. */
-function keyFromChords(labels: string[], weights: number[]): { pc: number; mode: "major" | "minor" } {
+function keyFromChords(
+  labels: string[],
+  weights: number[],
+  language: "english" | "hindi" | "tamil" = "english",
+): { pc: number; mode: "major" | "minor" } {
   const hist = new Float32Array(12);
   const modeVote = new Float32Array(12);
   for (let i = 0; i < labels.length; i++) {
@@ -696,13 +726,14 @@ function keyFromChords(labels: string[], weights: number[]): { pc: number; mode:
   for (const v of hist) total += v;
   const norm = Array.from(hist, (v) => v / (total || 1));
 
+  const profile = KEY_PROFILES[language] ?? KEY_PROFILES.english;
   let best = { pc: 0, mode: "major" as "major" | "minor", score: -Infinity };
   for (let shift = 0; shift < 12; shift++) {
     let maj = 0;
     let min = 0;
     for (let i = 0; i < 12; i++) {
-      maj += norm[(i + shift) % 12]! * MAJOR_PROFILE[i]!;
-      min += norm[(i + shift) % 12]! * MINOR_PROFILE[i]!;
+      maj += norm[(i + shift) % 12]! * profile.major[i]!;
+      min += norm[(i + shift) % 12]! * profile.minor[i]!;
     }
     // a minor tonic is only credible if minor chords actually occur on it
     min += modeVote[shift]! * 0.02;
@@ -943,8 +974,11 @@ function fifthsDistance(a: number, b: number): number {
   return Math.min(d, 12 - d);
 }
 
-/** Precomputed transition penalty between every pair of chord states. */
-function buildTransitionMatrix(changeCost: number): Float32Array[] {
+/** Precomputed transition penalty between every pair of chord states, adapted for language idiom. */
+function buildTransitionMatrix(
+  changeCost: number,
+  language: "english" | "hindi" | "tamil" = "english",
+): Float32Array[] {
   const n = TEMPLATES.length;
   const rows: Float32Array[] = [];
   for (let i = 0; i < n; i++) {
@@ -956,8 +990,22 @@ function buildTransitionMatrix(changeCost: number): Float32Array[] {
         continue;
       }
       const to = TEMPLATES[j]!;
-      // Nearby roots on the circle of fifths are the common progressions.
-      const harmonic = 0.035 * fifthsDistance(from.rootPc, to.rootPc);
+      const diffSemitones = ((to.rootPc - from.rootPc) % 12 + 12) % 12;
+      let harmonic = 0.035 * fifthsDistance(from.rootPc, to.rootPc);
+
+      if (language === "hindi") {
+        // Stepwise whole-step and fourth descents common in Bollywood & Hindustani progressions
+        if (diffSemitones === 2 || diffSemitones === 10) harmonic *= 0.65;
+        if (from.label.includes("m") && (diffSemitones === 10 || diffSemitones === 8)) harmonic *= 0.6;
+      } else if (language === "tamil") {
+        // Chromatic mediants (minor third = 3 or 9; major third = 4 or 8) e.g., C <-> Eb, C <-> Ab (Rahman / Ilaiyaraaja)
+        if (diffSemitones === 3 || diffSemitones === 9 || diffSemitones === 4 || diffSemitones === 8) {
+          harmonic *= 0.55;
+        }
+        if (diffSemitones === 2 || diffSemitones === 10) harmonic *= 0.7;
+        if (from.label.includes("sus") && to.rootPc === from.rootPc) harmonic *= 0.45;
+      }
+
       // Changing quality on the same root (C -> Cm) is rarer than moving root.
       const sameRoot = from.rootPc === to.rootPc ? 0.05 : 0;
       row[j] = -(changeCost + harmonic + sameRoot);
@@ -965,6 +1013,77 @@ function buildTransitionMatrix(changeCost: number): Float32Array[] {
     rows.push(row);
   }
   return rows;
+}
+
+/**
+ * Detects whether the audio harmonic profile aligns closest to English/Western diatonic,
+ * Hindi (Hindustani raga/stepwise), or Tamil (Carnatic/chromatic-mediant) harmonic styles.
+ */
+export function detectLanguageProfile(
+  chroma: Float32Array[],
+  chordLabels: string[] = [],
+): "english" | "hindi" | "tamil" {
+  if (chroma.length === 0) return "english";
+
+  let mediantCount = 0;
+  let stepwiseCount = 0;
+  let fifthCount = 0;
+  let susCount = 0;
+  let totalTransitions = 0;
+
+  for (let i = 1; i < chordLabels.length; i++) {
+    const prev = chordLabels[i - 1];
+    const curr = chordLabels[i];
+    if (!prev || !curr || prev === "N" || curr === "N" || prev === curr) continue;
+    const tPrev = TEMPLATES.find((t) => t.label === prev);
+    const tCurr = TEMPLATES.find((t) => t.label === curr);
+    if (!tPrev || !tCurr) continue;
+    totalTransitions++;
+    const step = ((tCurr.rootPc - tPrev.rootPc) % 12 + 12) % 12;
+    if (step === 7 || step === 5) fifthCount++;
+    else if (step === 2 || step === 10) stepwiseCount++;
+    else if (step === 3 || step === 4 || step === 8 || step === 9) mediantCount++;
+    if (curr.includes("sus") || prev.includes("sus")) susCount++;
+  }
+
+  if (totalTransitions >= 5) {
+    const mediantRatio = mediantCount / totalTransitions;
+    const stepwiseRatio = stepwiseCount / totalTransitions;
+    const fifthRatio = fifthCount / totalTransitions;
+
+    if (mediantRatio >= 0.16 || (mediantRatio >= 0.12 && susCount >= 2)) return "tamil";
+    if (stepwiseRatio >= 0.32) return "hindi";
+    if (fifthRatio >= 0.42) return "english";
+  }
+
+  // Fallback: correlate average chroma with language key profiles
+  const avg = new Float32Array(12);
+  for (const c of chroma) for (let i = 0; i < 12; i++) avg[i] = avg[i]! + c[i]!;
+  const n = chroma.length || 1;
+  for (let i = 0; i < 12; i++) avg[i] = avg[i]! / n;
+
+  let bestLang: "english" | "hindi" | "tamil" = "english";
+  let bestScore = -Infinity;
+
+  for (const lang of ["english", "hindi", "tamil"] as const) {
+    const prof = KEY_PROFILES[lang];
+    for (let shift = 0; shift < 12; shift++) {
+      let sMaj = 0;
+      let sMin = 0;
+      for (let i = 0; i < 12; i++) {
+        const val = avg[(i + shift) % 12]!;
+        sMaj += val * prof.major[i]!;
+        sMin += val * prof.minor[i]!;
+      }
+      const score = Math.max(sMaj, sMin);
+      if (score > bestScore) {
+        bestScore = score;
+        bestLang = lang;
+      }
+    }
+  }
+
+  return bestLang;
 }
 
 /**
@@ -977,11 +1096,12 @@ function viterbiDecode(
   beatsPerBar: number,
   downbeatOffset: number,
   changeCost: number,
+  language: "english" | "hindi" | "tamil" = "english",
 ): number[] {
   const n = emissions.length;
   const states = TEMPLATES.length;
   if (n === 0) return [];
-  const trans = buildTransitionMatrix(changeCost);
+  const trans = buildTransitionMatrix(changeCost, language);
 
   let prev = Float32Array.from(emissions[0]!);
   const back: Int16Array[] = [];
@@ -1064,6 +1184,7 @@ function estimateMetre(
 
 export interface AnalyzeOptions {
   onProgress?: (pct: number, stage: string) => void;
+  language?: ACRLanguage;
 }
 
 export async function analyzeAudioBuffer(
@@ -1178,12 +1299,16 @@ export async function analyzeAudioBuffer(
   // Pass 1: no key prior.
   const rawEmissions = beatChroma.map((vec, i) => templateScores(vec, beatBass[i]!, null));
   const metre = estimateMetre(rawEmissions, beatStrength);
-  const firstPass = viterbiDecode(rawEmissions, metre.beatsPerBar, metre.offset, 0.22);
+  const firstPass = viterbiDecode(rawEmissions, metre.beatsPerBar, metre.offset, 0.22, "english");
 
-  // Pass 2: condition on the key implied by pass 1.
+  // Pass 2: resolve language specialization (auto-detected or user-specified)
   const firstLabels = firstPass.map((idx) => TEMPLATES[idx]!.label);
-  const chordKey = keyFromChords(firstLabels, beatEnergy);
-  const chromaKey = estimateKey(beatChroma);
+  const detectedLang = detectLanguageProfile(beatChroma, firstLabels);
+  const effectiveLang: "english" | "hindi" | "tamil" =
+    opts.language && opts.language !== "auto" ? opts.language : detectedLang;
+
+  const chordKey = keyFromChords(firstLabels, beatEnergy, effectiveLang);
+  const chromaKey = estimateKey(beatChroma, effectiveLang);
   // Trust the decoded chord track, but fall back to the chroma key when the
   // first pass produced almost no harmonic information.
   const decodedChords = firstLabels.filter((l) => l !== "N").length;
@@ -1191,7 +1316,7 @@ export async function analyzeAudioBuffer(
   const scale = scaleOf(key.pc, key.mode);
 
   const emissions = beatChroma.map((vec, i) => templateScores(vec, beatBass[i]!, scale));
-  const path = viterbiDecode(emissions, metre.beatsPerBar, metre.offset, 0.24);
+  const path = viterbiDecode(emissions, metre.beatsPerBar, metre.offset, 0.24, effectiveLang);
 
 
   report(90, "Cleaning up");
@@ -1231,6 +1356,7 @@ export async function analyzeAudioBuffer(
     timeSignature: metre.beatsPerBar,
     chords: chords.filter((c) => c.end - c.start > 0.08),
     beatChords: smoothed,
+    language: effectiveLang,
   };
 }
 

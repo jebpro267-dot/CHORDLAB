@@ -4,14 +4,33 @@
  * Everything runs in the browser on top of Web Audio + SoundTouch.
  */
 
-export const STEMS = ["vocals", "drums", "bass", "other"] as const;
+export const STEMS = [
+  "vocals",
+  "piano",
+  "drums",
+  "bass_guitar",
+  "acoustic_guitar",
+  "electric_guitar",
+  "flute",
+  "violin",
+  "ukulele",
+  "bass",
+  "other",
+] as const;
 export type StemName = (typeof STEMS)[number];
 export type TrackName = "full" | StemName;
 
 export const STEM_LABELS: Record<TrackName, string> = {
   full: "Original",
   vocals: "Vocals",
+  piano: "Piano",
   drums: "Drums",
+  bass_guitar: "Bass Guitar",
+  acoustic_guitar: "Acoustic Guitar",
+  electric_guitar: "Electric Guitar",
+  flute: "Flute",
+  violin: "Violin",
+  ukulele: "Ukulele",
   bass: "Bass",
   other: "Other",
 };

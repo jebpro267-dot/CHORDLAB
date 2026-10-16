@@ -1,3 +1,6 @@
 -r requirements.txt
 tensorflow>=2.16,<3.0
-librosa>=0.10.2,<1.0
+librosa>=0.10.2
+soundfile>=0.12.1
+demucs>=4.0.0
+torchaudio>=2.1.0

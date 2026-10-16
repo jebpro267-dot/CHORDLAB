@@ -27,24 +27,29 @@ PITCH_CLASSES = {
 }
 
 
+def get_model_paths(language: str = "auto") -> tuple[Path, Path]:
+    """Resolve the model and label paths for the specified language or fallback to default."""
+    lang = (language or "auto").lower().strip()
+    if lang in ("english", "en"):
+        p = ROOT / "backend/data/chord_model_english.keras"
+        if p.is_file():
+            return p, p.with_suffix(".labels.json")
+    elif lang in ("hindi", "hi"):
+        p = ROOT / "backend/data/chord_model_hindi.keras"
+        if p.is_file():
+            return p, p.with_suffix(".labels.json")
+    elif lang in ("tamil", "ta"):
+        p = ROOT / "backend/data/chord_model_tamil.keras"
+        if p.is_file():
+            return p, p.with_suffix(".labels.json")
+    return MODEL_PATH, LABELS_PATH
+
+
 def model_status() -> dict[str, str]:
     """
-    Returns a status dictionary describing whether the TensorFlow chord model
-    is available and ready to use.
-
-    Checks for the presence of the model/labels files and the required Python
-    packages (TensorFlow, librosa) without loading anything into memory.
-
-    Returns:
-        dict with keys ``name``, ``status`` ("healthy" or "unavailable"),
-        and ``detail`` (human-readable explanation).
+    Returns a status dictionary describing whether the TensorFlow chord models
+    are available and ready to use across English, Hindi, Tamil, and default.
     """
-    if not MODEL_PATH.is_file() or not LABELS_PATH.is_file():
-        return {
-            "name": "TensorFlow chord model",
-            "status": "unavailable",
-            "detail": "Train a model with python -m backend.train_chord_model --download",
-        }
     if any(
         importlib.util.find_spec(package) is None
         for package in ("tensorflow", "librosa")
@@ -54,26 +59,40 @@ def model_status() -> dict[str, str]:
             "status": "unavailable",
             "detail": "Install backend/requirements-ml.txt in the API environment",
         }
+
+    english_ok = (ROOT / "backend/data/chord_model_english.keras").is_file()
+    hindi_ok = (ROOT / "backend/data/chord_model_hindi.keras").is_file()
+    tamil_ok = (ROOT / "backend/data/chord_model_tamil.keras").is_file()
+    default_ok = MODEL_PATH.is_file()
+
+    active_models = []
+    if english_ok:
+        active_models.append("English")
+    if hindi_ok:
+        active_models.append("Hindi")
+    if tamil_ok:
+        active_models.append("Tamil")
+    if default_ok:
+        active_models.append("Master")
+
+    if not active_models:
+        return {
+            "name": "TensorFlow chord model",
+            "status": "unavailable",
+            "detail": "Train models with python -m backend.train_chord_model --language all",
+        }
+
     return {
         "name": "TensorFlow chord model",
         "status": "healthy",
-        "detail": "Model and labels are ready",
+        "detail": f"Models ready: {', '.join(active_models)}",
     }
 
 
-@lru_cache(maxsize=1)
-def _load_model() -> tuple[Any, list[str]]:
+@lru_cache(maxsize=8)
+def _load_model(language: str = "auto") -> tuple[Any, list[str]]:
     """
-    Loads the Keras chord model and its label list from disk, caching the result
-    so subsequent calls return immediately.
-
-    Returns:
-        A ``(model, labels)`` tuple where ``model`` is a compiled Keras model
-        and ``labels`` is a list of chord-name strings indexed by class ID.
-
-    Raises:
-        RuntimeError: If TensorFlow is not installed, or if the model/labels
-            files are missing or corrupt.
+    Loads the Keras chord model and its label list from disk for the specified language.
     """
     try:
         import tensorflow as tf
@@ -82,14 +101,19 @@ def _load_model() -> tuple[Any, list[str]]:
             "TensorFlow is not installed; install backend/requirements-ml.txt"
         ) from error
 
-    if not MODEL_PATH.is_file() or not LABELS_PATH.is_file():
+    model_p, labels_p = get_model_paths(language)
+    if not model_p.is_file() or not labels_p.is_file():
+        # Try default master model if language specific model not found
+        model_p, labels_p = MODEL_PATH, LABELS_PATH
+
+    if not model_p.is_file() or not labels_p.is_file():
         raise RuntimeError(
             "The TensorFlow chord model is not trained; run "
-            "python -m backend.train_chord_model --download"
+            "python -m backend.train_chord_model --language all"
         )
     try:
-        labels = json.loads(LABELS_PATH.read_text(encoding="utf-8"))
-        model = tf.keras.models.load_model(MODEL_PATH)
+        labels = json.loads(labels_p.read_text(encoding="utf-8"))
+        model = tf.keras.models.load_model(model_p)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Could not load the TensorFlow chord model: {error}") from error
     if not isinstance(labels, list) or model.output_shape[-1] != len(labels):
@@ -164,7 +188,32 @@ def _make_windows(chroma: Any) -> tuple[Any, Any]:
     return windows[..., np.newaxis], centers
 
 
-def analyze_audio(audio: bytes) -> dict[str, Any]:
+def _detect_audio_language(chroma: Any) -> str:
+    """Detect whether chroma aligns closest with english, hindi, or tamil profiles."""
+    import numpy as np
+
+    avg = np.mean(chroma, axis=0)
+    norm = np.linalg.norm(avg) or 1.0
+    avg = avg / norm
+
+    profiles = {
+        "english": np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]),
+        "hindi": np.array([6.12, 1.95, 3.25, 2.10, 4.52, 3.10, 3.45, 5.30, 2.15, 3.50, 2.40, 3.05]),
+        "tamil": np.array([6.25, 2.10, 3.15, 2.65, 4.20, 3.85, 2.40, 5.15, 3.30, 3.20, 2.85, 2.75]),
+    }
+    best_lang = "english"
+    best_score = -1e9
+    for lang, prof in profiles.items():
+        p_norm = prof / (np.linalg.norm(prof) or 1.0)
+        for shift in range(12):
+            score = float(np.dot(np.roll(avg, shift), p_norm))
+            if score > best_score:
+                best_score = score
+                best_lang = lang
+    return best_lang
+
+
+def analyze_audio(audio: bytes, language: str = "auto") -> dict[str, Any]:
     """
     Runs the full TensorFlow chord-recognition pipeline on raw audio bytes.
 
@@ -173,17 +222,29 @@ def analyze_audio(audio: bytes) -> dict[str, Any]:
 
     Args:
         audio: Raw audio file bytes.
+        language: Language specialization ('english', 'hindi', 'tamil', or 'auto').
 
     Returns:
         A dict with keys:
         - ``"duration"`` (float): track length in seconds.
         - ``"chords"`` (list[dict]): list of chord events, each with
           ``"start"``, ``"end"``, ``"label"``, and ``"confidence"`` fields.
+        - ``"language"`` (str): resolved language model ('english', 'hindi', or 'tamil').
     """
     import numpy as np
 
-    model, labels = _load_model()
     chroma, duration = _audio_features(audio)
+    target_lang = (language or "auto").lower().strip()
+    if target_lang == "auto":
+        resolved_lang = _detect_audio_language(chroma)
+    elif target_lang in ("hindi", "hi"):
+        resolved_lang = "hindi"
+    elif target_lang in ("tamil", "ta"):
+        resolved_lang = "tamil"
+    else:
+        resolved_lang = "english"
+
+    model, labels = _load_model(resolved_lang)
     windows, centers = _make_windows(chroma)
     probabilities = model.predict(windows, batch_size=256, verbose=0)
     predictions = np.argmax(probabilities, axis=1)
@@ -223,7 +284,7 @@ def analyze_audio(audio: bytes) -> dict[str, Any]:
         current, start = label_id, index
         scores = [float(probabilities[index, label_id])]
     append_event(current, start, len(predictions) - 1, scores)
-    return {"duration": duration, "chords": events}
+    return {"duration": duration, "chords": events, "language": resolved_lang}
 
 
 def _label_id(root: int, quality: str) -> int:
@@ -243,45 +304,43 @@ def _label_id(root: int, quality: str) -> int:
 
 def chord_label_id(raw: str) -> int | None:
     """
-    Maps a Harte-notation chord label (e.g. ``"A:min7"``, ``"N"``) to the
-    integer class ID expected by the model, or returns ``None`` for unrecognised
-    labels.
-
-    Harte notation uses a ``root:quality`` format separated by a colon.  Slash
-    chords (``"A:min/b3"``) are supported; the inversion is ignored.
-
-    Args:
-        raw: Raw chord label string from an annotation file.
-
-    Returns:
-        Integer class ID, ``0`` for "no chord" tokens (N, X, NC), or ``None``
-        if the label cannot be parsed.
+    Maps a chord label (Harte notation like ``"A:min7"`` or direct symbol like ``"Am7"``, ``"C"``)
+    to the integer class ID expected by the model, or returns ``None`` for unrecognised labels.
     """
     token = raw.strip().split("/", 1)[0]
-    if token.upper() in {"N", "X", "NC"}:
+    if token.upper() in {"N", "X", "NC", ""}:
         return 0
     root, separator, quality = token.partition(":")
+    if not separator:
+        for p_name in sorted(PITCH_CLASSES.keys(), key=len, reverse=True):
+            if token.startswith(p_name):
+                root = p_name
+                quality = token[len(p_name):]
+                separator = ":"
+                break
     if not separator:
         return None
     pitch = PITCH_CLASSES.get(root)
     if pitch is None:
         return None
-    lowered = quality.lower()
+    lowered = quality.lower().strip()
     if lowered.startswith("hdim") or lowered.startswith("dim"):
         family = "dim"
     elif lowered.startswith("aug"):
         family = "aug"
     elif lowered.startswith("sus2"):
         family = "sus2"
-    elif lowered.startswith("sus4"):
+    elif lowered.startswith("sus4") or lowered == "sus":
         family = "sus4"
-    elif lowered.startswith("min7"):
+    elif lowered.startswith("min7") or lowered.startswith("m7"):
         family = "m7"
     elif lowered.startswith("maj7"):
         family = "maj7"
-    elif lowered.startswith("min"):
+    elif lowered.startswith("maj") or lowered == "":
+        family = ""
+    elif lowered.startswith("min") or lowered.startswith("m"):
         family = "m"
-    elif lowered.startswith("7"):
+    elif lowered.startswith("7") or lowered.startswith("dom7"):
         family = "7"
     else:
         family = ""

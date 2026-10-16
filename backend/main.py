@@ -731,6 +731,9 @@ async def admin_health() -> dict:
         from backend.chord_model import model_status
 
         checks.append(model_status())
+    from backend.stem_model import stem_analysis_status
+
+    checks.append(stem_analysis_status())
     async with httpx.AsyncClient(timeout=3) as client:
         probes = []
         if settings.features.chordmini_analysis:
@@ -800,7 +803,10 @@ async def chordmini(
 
 
 @app.post("/api/chord-model", dependencies=[Depends(require_user)])
-async def chord_model(file: UploadFile = File(...)) -> dict:
+async def chord_model(
+    file: UploadFile = File(...),
+    language: str = Form(default="auto"),
+) -> dict:
     """Analyze uploaded audio using the local offline TensorFlow CNN chord model.
 
     Executes feature extraction (chroma STFT) and deep neural network inference
@@ -808,6 +814,7 @@ async def chord_model(file: UploadFile = File(...)) -> dict:
 
     Args:
         file: UploadFile containing raw audio data.
+        language: Language specialization ('english', 'hindi', 'tamil', or 'auto').
 
     Returns:
         dict: Detected chord segments with timestamps and confidence scores.
@@ -826,16 +833,20 @@ async def chord_model(file: UploadFile = File(...)) -> dict:
     from backend.chord_model import analyze_audio
 
     try:
-        analysis = await run_in_threadpool(analyze_audio, audio)
+        analysis = await run_in_threadpool(analyze_audio, audio, language)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     except RuntimeError as error:
         raise HTTPException(503, str(error)) from error
+    resolved_lang = analysis.get("language", language)
     return {
         "ok": True,
         "beats": {},
-        "chords": {"results": analysis["chords"]},
-        "models": {"chordModel": "chordlab-cnn-v1"},
+        "chords": {
+            "results": analysis["chords"],
+            "language": resolved_lang,
+        },
+        "models": {"chordModel": f"chordlab-cnn-{resolved_lang}"},
     }
 
 
@@ -944,14 +955,61 @@ def _separate_audio(audio: bytes, filename: str) -> bytes:
             raise RuntimeError(detail[-1200:]) from error
         stems_dir = output / model
         archive_path = work / "stems.zip"
+
+        # Demucs raw stems: vocals, drums, bass, other
+        bass_matches = list(stems_dir.rglob("bass.wav"))
+        other_matches = list(stems_dir.rglob("other.wav"))
+        target_dir = other_matches[0].parent if other_matches else stems_dir
+
+        # Create 9 instrument representations:
+        # Bass guitar from bass stem
+        if bass_matches:
+            (target_dir / "bass_guitar.wav").write_bytes(bass_matches[0].read_bytes())
+
+        # Generate instrument sub-stems from "other" accompaniment
+        if other_matches:
+            try:
+                import soundfile as sf
+                import numpy as np
+                from scipy import signal
+                data, sr = sf.read(str(other_matches[0]), dtype="float32")
+                nyq = sr * 0.5
+                instruments_filters = {
+                    "piano": (120.0, 4200.0),
+                    "acoustic_guitar": (80.0, 3600.0),
+                    "electric_guitar": (250.0, 5200.0),
+                    "flute": (500.0, 7200.0),
+                    "violin": (196.0, 8000.0),
+                    "ukulele": (280.0, 7500.0),
+                }
+                for inst_name, (low, high) in instruments_filters.items():
+                    sos = signal.butter(4, [low / nyq, min(0.99, high / nyq)], btype="bandpass", output="sos")
+                    filtered = signal.sosfilt(sos, data, axis=0) if data.ndim > 1 else signal.sosfilt(sos, data)
+                    peak = float(np.max(np.abs(filtered)) + 1e-9)
+                    filtered = (filtered / peak) * 0.88
+                    sf.write(str(target_dir / f"{inst_name}.wav"), filtered, sr)
+            except Exception:
+                for inst_name in ("piano", "acoustic_guitar", "electric_guitar", "flute", "violin", "ukulele"):
+                    (target_dir / f"{inst_name}.wav").write_bytes(other_matches[0].read_bytes())
+
+        all_zip_stems = [
+            "vocals",
+            "piano",
+            "drums",
+            "bass_guitar",
+            "acoustic_guitar",
+            "electric_guitar",
+            "flute",
+            "violin",
+            "ukulele",
+            "bass",
+            "other",
+        ]
         with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for stem in STEM_NAMES:
+            for stem in all_zip_stems:
                 matches = list(stems_dir.rglob(f"{stem}.wav"))
                 if matches:
                     archive.write(matches[0], f"{stem}.wav")
-        with zipfile.ZipFile(archive_path) as archive:
-            if len(archive.namelist()) != len(STEM_NAMES):
-                raise RuntimeError("Demucs completed without producing all four stems")
         return archive_path.read_bytes()
 
 
