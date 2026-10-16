@@ -13,6 +13,9 @@ export interface LinkMeta {
  * Streaming platforms do not permit downloading their audio, so only the
  * title, artist and artwork are imported — the audio itself comes from a
  * file the user picks or records.
+ *
+ * @param args - Wrapper object containing the song URL data (`{ url: string }`).
+ * @returns Promise resolving to the extracted LinkMeta (source, title, artist, thumbnail, url).
  */
 export function importLink({ data }: { data: { url: string } }): Promise<LinkMeta> {
   return backendJson<LinkMeta>("/api/import-link", {

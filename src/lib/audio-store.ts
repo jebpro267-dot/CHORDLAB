@@ -1,6 +1,13 @@
 const DB_NAME = "chordlab-audio";
 const STORE = "files";
 
+/**
+ * Opens or upgrades the browser's IndexedDB database used for storing raw audio Blobs.
+ * IndexedDB provides asynchronous, high-capacity client-side persistence that exceeds
+ * localStorage's 5MB limit and supports binary audio files directly.
+ *
+ * @returns Promise resolving to the opened IDBDatabase instance.
+ */
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, 1);
@@ -12,6 +19,13 @@ function open(): Promise<IDBDatabase> {
   });
 }
 
+/**
+ * Persists an audio Blob (full track or isolated stem) into IndexedDB under the specified key ID.
+ * Storage operations are non-blocking and fail gracefully if quota or permissions fail.
+ *
+ * @param id - Unique storage key identifier (e.g. song ID or `songId::stemName`).
+ * @param blob - Binary audio Blob data.
+ */
 export async function putAudio(id: string, blob: Blob) {
   try {
     const db = await open();
@@ -26,6 +40,12 @@ export async function putAudio(id: string, blob: Blob) {
   }
 }
 
+/**
+ * Retrieves a cached audio Blob from IndexedDB by key ID.
+ *
+ * @param id - Unique storage key identifier.
+ * @returns Promise resolving to the audio Blob if found, or null if missing or error occurs.
+ */
 export async function getAudio(id: string): Promise<Blob | null> {
   try {
     const db = await open();
@@ -40,6 +60,11 @@ export async function getAudio(id: string): Promise<Blob | null> {
   }
 }
 
+/**
+ * Deletes a stored audio Blob from IndexedDB by key ID.
+ *
+ * @param id - Unique storage key identifier to remove.
+ */
 export async function deleteAudio(id: string) {
   try {
     const db = await open();

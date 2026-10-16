@@ -86,6 +86,18 @@ const navLabels: { key: keyof AppSettings["navigation"]; label: string }[] = [
 
 const apiBase = (import.meta.env["VITE_BACKEND_URL"] || "").replace(/\/+$/, "");
 
+/**
+ * Dispatches an authenticated HTTP fetch request to the administrative API endpoint.
+ * Automatically serializes JSON bodies, injects bearer authentication headers,
+ * and parses JSON error messages on failures.
+ *
+ * @template T - Expected JSON response payload type.
+ * @param path - API URL path (relative to `apiBase`).
+ * @param token - Bearer session token.
+ * @param init - Optional RequestInit configuration options.
+ * @returns Promise resolving to the typed JSON response.
+ * @throws Error with descriptive error detail if the HTTP request returns an error code.
+ */
 async function adminRequest<T>(path: string, token: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
@@ -102,6 +114,13 @@ async function adminRequest<T>(path: string, token: string, init?: RequestInit):
   return (await response.json()) as T;
 }
 
+/**
+ * Root component for the standalone administrative control dashboard.
+ * Manages admin authentication, global feature toggles, navigation visibility,
+ * theme appearance, and live backend health diagnostic monitoring.
+ *
+ * @returns React JSX element rendering the administrative portal.
+ */
 function AdminApp() {
   const [token, setToken] = useState("");
   const [username, setUsername] = useState("jebin");
@@ -112,6 +131,11 @@ function AdminApp() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
+  /**
+   * Fetches latest application configuration settings and system health checks in parallel.
+   *
+   * @param tokenToUse - Valid admin session bearer token.
+   */
   async function load(tokenToUse: string) {
     setBusy(true);
     setError("");
@@ -132,6 +156,11 @@ function AdminApp() {
     }
   }
 
+  /**
+   * Submits administrator credentials to `/api/admin/login` and initializes the dashboard.
+   *
+   * @param event - Form submit event.
+   */
   async function signIn(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -158,6 +187,11 @@ function AdminApp() {
     }
   }
 
+  /**
+   * Saves updated configuration settings to `/api/admin/settings` and refreshes health status.
+   *
+   * @param event - Form submit event.
+   */
   async function save(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -178,6 +212,7 @@ function AdminApp() {
     }
   }
 
+  /** Refreshes health probe status checks from `/api/admin/health`. */
   async function refreshHealth() {
     if (!token) return;
     try {
@@ -187,6 +222,7 @@ function AdminApp() {
     }
   }
 
+  /** Terminates the active administrator session and returns to the sign-in form. */
   async function signOut() {
     if (token) {
       try {
@@ -460,6 +496,12 @@ function AdminApp() {
   }
 }
 
+/**
+ * Displays a styled section title and descriptive subtitle in the admin panel.
+ *
+ * @param props - Section heading properties.
+ * @returns React JSX element rendering section header.
+ */
 function SectionHeading({ title, detail }: { title: string; detail: string }) {
   return (
     <div>
@@ -469,6 +511,12 @@ function SectionHeading({ title, detail }: { title: string; detail: string }) {
   );
 }
 
+/**
+ * Toggle switch row for enabling or disabling individual application features and navigation links.
+ *
+ * @param props - Switch row properties.
+ * @returns React JSX element rendering interactive checkbox toggle.
+ */
 function ToggleRow({
   label,
   detail,
@@ -496,6 +544,12 @@ function ToggleRow({
   );
 }
 
+/**
+ * Text input field with label and character length constraint.
+ *
+ * @param props - Text field properties.
+ * @returns React JSX element rendering text input.
+ */
 function TextField({
   label,
   value,
@@ -520,6 +574,12 @@ function TextField({
   );
 }
 
+/**
+ * Color picker input field with hex preview badge for branding customization.
+ *
+ * @param props - Color field properties.
+ * @returns React JSX element rendering color selector.
+ */
 function ColorField({
   label,
   value,
@@ -545,6 +605,12 @@ function ColorField({
   );
 }
 
+/**
+ * Diagnostic health status card showing connectivity indicators for backend and third-party integrations.
+ *
+ * @param props - Health check item properties.
+ * @returns React JSX element rendering health report badge.
+ */
 function HealthItem({ check }: { check: HealthCheck }) {
   const healthy = check.status === "healthy";
   return (

@@ -75,6 +75,17 @@ const AppSettingsContext = createContext<AppSettingsContextValue>({
   ready: false,
 });
 
+/**
+ * React context provider that fetches server-driven application settings on
+ * mount and makes them available to all descendant components.  It also applies
+ * CSS custom-property overrides (primary colour, accent colour) whenever the
+ * settings change, keeping the theme in sync with the backend configuration.
+ *
+ * Falls back to `DEFAULT_APP_SETTINGS` while the fetch is pending or if the
+ * backend is unavailable.
+ *
+ * @param children - Child React nodes that will receive the settings context.
+ */
 export function AppSettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState(DEFAULT_APP_SETTINGS);
   const [ready, setReady] = useState(false);
@@ -114,6 +125,12 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * React hook that returns the current application settings and a `ready` flag
+ * indicating whether the settings have been loaded from the server.
+ *
+ * @returns `{ settings, ready }` from the nearest `<AppSettingsProvider>`.
+ */
 export function useAppSettings(): AppSettingsContextValue {
   return useContext(AppSettingsContext);
 }

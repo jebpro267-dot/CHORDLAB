@@ -29,7 +29,15 @@ export interface Marker {
   label: string;
 }
 
-/** Practice studio: mix stems, change speed and key, loop a section, click track. */
+/**
+ * Interactive practice studio panel component.
+ * Provides multi-track audio playback, individual stem volume/muting,
+ * real-time tempo stretching, pitch shifting, beat-synchronized metronome,
+ * A-B section looping, and on-demand AI stem separation.
+ *
+ * @param props - Component props containing the song object.
+ * @returns React JSX element rendering the practice studio.
+ */
 export function StudioPanel({ song }: { song: Song }) {
   const playerRef = useRef<StudioPlayer | null>(null);
   const [ready, setReady] = useState(false);
@@ -108,6 +116,7 @@ export function StudioPanel({ song }: { song: Song }) {
     };
   }, [song.id, song.analysis.beats, song.analysis.timeSignature]);
 
+  /** Toggles between playback and paused states. */
   function toggle() {
     const p = playerRef.current;
     if (!p) return;
@@ -120,11 +129,20 @@ export function StudioPanel({ song }: { song: Song }) {
     }
   }
 
+  /**
+   * Seeks player transport to a specific timestamp in seconds.
+   *
+   * @param t - Target time position in seconds.
+   */
   function seek(t: number) {
     playerRef.current?.seek(t);
     setPosition(t);
   }
 
+  /**
+   * Initiates Demucs AI stem separation by uploading the full audio track to the backend,
+   * unzipping stems into local IndexedDB storage, and mounting stems into the studio mixer.
+   */
   async function separate() {
     const blob = await getAudio(song.id);
     if (!blob) {
@@ -384,6 +402,12 @@ export function StudioPanel({ song }: { song: Song }) {
   );
 }
 
+/**
+ * Helper row layout component displaying an icon, title, optional value badge, and control slot.
+ *
+ * @param props - Row properties.
+ * @returns React JSX element rendering the formatted control row.
+ */
 function Row({
   icon,
   label,
@@ -406,6 +430,12 @@ function Row({
   );
 }
 
+/**
+ * Formats seconds into a standard `mm:ss` digital clock string.
+ *
+ * @param s - Duration in seconds.
+ * @returns Formatted minute:second string.
+ */
 function fmt(s: number) {
   const m = Math.floor(s / 60);
   const r = Math.floor(s % 60);

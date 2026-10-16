@@ -38,6 +38,19 @@ GUITARSET_URLS = {
 
 
 def download(url: str, target: Path, expected_md5: str) -> None:
+    """Download a remote dataset file with MD5 checksum verification and progress logging.
+
+    Streams chunks of 1 MiB to a temporary `.part` file, verifies the computed MD5 digest
+    against `expected_md5`, and atomically replaces the target path once verified.
+
+    Args:
+        url: Remote HTTP(S) URL of the dataset archive to download.
+        target: Local file destination Path where the verified archive should reside.
+        expected_md5: Expected 32-character hexadecimal MD5 hash string.
+
+    Raises:
+        RuntimeError: If MD5 verification fails after download completes.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and _md5(target) == expected_md5:
         print(f"Already downloaded and verified {target.name}")
@@ -63,6 +76,14 @@ def download(url: str, target: Path, expected_md5: str) -> None:
 
 
 def _md5(path: Path) -> str:
+    """Calculate the MD5 checksum of a file in 1 MiB stream buffers.
+
+    Args:
+        path: Path to the target file on disk.
+
+    Returns:
+        str: Hexadecimal string representation of the MD5 hash.
+    """
     digest = hashlib.md5()
     with path.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -71,6 +92,18 @@ def _md5(path: Path) -> str:
 
 
 def safe_extract(archive_path: Path, destination: Path) -> None:
+    """Extract a ZIP archive preventing Zip Slip directory traversal vulnerabilities.
+
+    Validates that each member file's relative target resides strictly within the
+    intended `destination` folder before extraction.
+
+    Args:
+        archive_path: Path to the ZIP archive to unpack.
+        destination: Path to destination extraction directory.
+
+    Raises:
+        RuntimeError: If any path inside the archive attempts to escape the root directory.
+    """
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
     with zipfile.ZipFile(archive_path) as archive:
@@ -90,6 +123,14 @@ def safe_extract(archive_path: Path, destination: Path) -> None:
 
 
 def download_guitarset(data_dir: Path) -> None:
+    """Fetch and extract the GuitarSet dataset annotations and microphone audio tracks.
+
+    Downloads both `annotation.zip` and `audio_mono-mic.zip` from Zenodo and safely
+    unpacks them into `data_dir`.
+
+    Args:
+        data_dir: Destination directory path for the GuitarSet data files.
+    """
     raw_dir = data_dir / "downloads"
     for filename, (url, checksum) in GUITARSET_URLS.items():
         archive = raw_dir / filename
@@ -98,12 +139,33 @@ def download_guitarset(data_dir: Path) -> None:
 
 
 def _quality_labels() -> list[str]:
+    """Generate the complete list of chord label class names including 'N' (no chord).
+
+    Builds classes for all 12 pitch chroma roots combined with major, minor, and seventh qualities.
+
+    Returns:
+        list[str]: Complete ordered list of chord label strings (e.g. ['N', 'C', 'C:min', ...]).
+    """
     return ["N"] + [
         pitch + quality for pitch in PITCH_NAMES for quality in QUALITIES
     ]
 
 
 def _windows_for_track(audio_path: Path, annotation_path: Path) -> tuple[Any, Any]:
+    """Extract sliding 12-semitone chroma feature windows and corresponding chord labels for an audio track.
+
+    Reads JAMS chord annotations, computes normalized 12-bin STFT chromagram,
+    pads the edges, slices temporal windows of size `WINDOW_FRAMES`, and maps
+    ground-truth chord labels to integer class IDs.
+
+    Args:
+        audio_path: Path to the audio file (WAV or FLAC).
+        annotation_path: Path to the corresponding JAMS annotation file.
+
+    Returns:
+        tuple[Any, Any]: (windows_tensor, labels_array) where windows is shaped (N, WINDOW_FRAMES, 12, 1)
+            and labels is shaped (N,).
+    """
     import librosa
     import numpy as np
 
@@ -154,6 +216,23 @@ def _windows_for_track(audio_path: Path, annotation_path: Path) -> tuple[Any, An
 
 
 def build_model(num_labels: int) -> Any:
+    """Construct and compile the 2D Convolutional Neural Network (CNN) for chord classification.
+
+    Architecture:
+    1. Input layer: (WINDOW_FRAMES, 12 pitch classes, 1 channel)
+    2. Conv2D (32 filters, 5x3 kernel, ReLU) + MaxPooling2D (2, 1)
+    3. Conv2D (64 filters, 5x3 kernel, ReLU) + MaxPooling2D (2, 1)
+    4. Conv2D (96 filters, 3x3 kernel, ReLU)
+    5. GlobalAveragePooling2D
+    6. Dense (128 units, ReLU) + Dropout (0.35)
+    7. Softmax output layer with `num_labels` classes
+
+    Args:
+        num_labels: Total number of chord classes.
+
+    Returns:
+        tf.keras.Model: Compiled Keras model ready for training with Adam optimizer.
+    """
     import tensorflow as tf
 
     inputs = tf.keras.Input(shape=(WINDOW_FRAMES, 12, 1))
@@ -176,6 +255,27 @@ def build_model(num_labels: int) -> Any:
 
 
 def train(data_dir: Path, epochs: int, seed: int, max_groups: int | None) -> None:
+    """Execute end-to-end training pipeline for the ChordLab CNN model.
+
+    Pipeline steps:
+    1. Discovers and pairs GuitarSet audio recordings with JAMS chord ground-truth.
+    2. Organizes dataset into song groups and creates held-out group validation splits.
+    3. Extracts chroma feature windows.
+    4. Applies pitch-shift data augmentation (-2 and +2 semitone roll on the pitch axis).
+    5. Computes inverse-frequency class weights to address chord distribution imbalances.
+    6. Trains CNN model with EarlyStopping and ReduceLROnPlateau callbacks.
+    7. Evaluates held-out validation accuracy and saves `.keras` model and labels JSON.
+
+    Args:
+        data_dir: Path to extracted GuitarSet directory containing JAMS annotations and audio.
+        epochs: Maximum number of training epochs.
+        seed: Random seed for deterministic reproducibility.
+        max_groups: Optional limit on the number of song groups to train on for quick prototyping.
+
+    Raises:
+        RuntimeError: If insufficient tracks or data files are found.
+        ValueError: If max_groups is less than 2.
+    """
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -231,6 +331,7 @@ def train(data_dir: Path, epochs: int, seed: int, max_groups: int | None) -> Non
     training_groups = group_names[validation_count:]
 
     def combine(groups: list[str]) -> tuple[Any, Any]:
+        """Concatenate all feature windows and labels across the given song groups."""
         items = [track for group in groups for track in tracks[group]]
         return np.concatenate([item[0] for item in items]), np.concatenate([item[1] for item in items])
 
@@ -291,6 +392,7 @@ def train(data_dir: Path, epochs: int, seed: int, max_groups: int | None) -> Non
 
 
 def main() -> None:
+    """CLI entry point for downloading dataset and launching chord recognizer model training."""
     parser = argparse.ArgumentParser(description="Train ChordLab's TensorFlow chord recognizer")
     parser.add_argument(
         "--data-dir",

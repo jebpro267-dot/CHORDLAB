@@ -17,7 +17,14 @@ interface Props {
   activeChordTime?: number | null;
 }
 
-/** Ultimate-Guitar style monospace chord sheet. */
+/**
+ * Renders an Ultimate-Guitar style monospace chord sheet with section headers,
+ * transposed chord positions aligned above lyrics, and synchronized playback highlights.
+ *
+ * @param props - Chord sheet view properties including sheet model, metadata, transposition, and zoom.
+ * @param ref - React ref forwarded to the outer container element for printing/exporting.
+ * @returns React JSX element rendering the formatted sheet.
+ */
 export const ChordSheetView = forwardRef<HTMLDivElement, Props>(function ChordSheetView(
   {
     sheet,
@@ -71,6 +78,15 @@ export const ChordSheetView = forwardRef<HTMLDivElement, Props>(function ChordSh
   );
 });
 
+/**
+ * Formats and spaces chord tokens along a single text line to align with underlying lyrics.
+ *
+ * @param chords - Array of timestamped and positioned chord entries.
+ * @param transpose - Number of semitones to transpose.
+ * @param useFlats - Whether to format accidentals with flats rather than sharps.
+ * @param activeTime - Current playback timestamp in seconds for highlighting active chord.
+ * @returns Array of React nodes containing spaced and styled chord token spans.
+ */
 function renderChordLine(
   chords: Props["sheet"]["sections"][number]["lines"][number]["chords"],
   transpose: number,

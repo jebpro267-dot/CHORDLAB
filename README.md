@@ -105,7 +105,8 @@ The user app runs at `http://localhost:5173/`; the standalone admin console is
 at `http://localhost:5174/`. FastAPI's interactive API documentation is at
 `http://localhost:8000/docs`. Both Vite servers proxy `/api` requests to FastAPI
 on port 8000. Set `VITE_BACKEND_URL` when deploying the frontends and API to
-separate origins.
+separate origins. Both the Python backend and TypeScript frontend modules
+include comprehensive docstrings, type annotations, and OpenAPI schemas.
 
 When preparing a requested "commit everything", review and update this README
 to match the current project features and setup before committing.

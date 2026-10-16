@@ -2,6 +2,15 @@ import { unzipSync } from "fflate";
 import { backendFetch } from "./backend";
 import { STEMS, type StemName } from "./studio";
 
+/**
+ * Uploads an audio file to the backend stem-separation endpoint and returns
+ * the individual stems as typed Blobs.  The server responds with a ZIP archive
+ * containing one audio file per stem (vocals, drums, bass, other).
+ *
+ * @param file - Audio `File` or `Blob` to separate.
+ * @returns Array of `{ name, blob }` objects, one per detected stem.
+ * @throws {Error} When the server returns an error or the response body is invalid.
+ */
 export async function startSeparation(
   file: File | Blob,
 ): Promise<{ name: StemName; blob: Blob }[]> {

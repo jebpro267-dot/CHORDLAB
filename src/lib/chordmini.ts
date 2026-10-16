@@ -52,6 +52,15 @@ const QUALITY_MAP: Record<string, string> = {
 };
 
 /** "A:min7/b3" -> "Am7"; "N" / "X" -> "N". */
+/**
+ * Converts a Harte-notation chord label (e.g. `"A:min7/b3"`, `"N"`, `"X"`) to
+ * the compact display format used throughout the app (e.g. `"Am7"`, `"N"`).
+ * Strips inversion info, maps quality synonyms, and returns unknown qualities
+ * verbatim so nothing is silently lost.
+ *
+ * @param raw - Raw label string from the ChordMini or TensorFlow API response.
+ * @returns Normalised chord label string.
+ */
 export function normalizeChordLabel(raw: string): string {
   const token = (raw ?? "").trim();
   if (!token || token === "N" || token === "X" || /^n\.?c\.?$/i.test(token)) return "N";
@@ -75,11 +84,26 @@ export function normalizeChordLabel(raw: string): string {
 
 type Json = Record<string, unknown>;
 
+/**
+ * Safely coerces an unknown JSON value to a finite number.
+ *
+ * @param v - Any value from a parsed JSON object.
+ * @returns The numeric value, or `null` if not a finite number.
+ */
 function num(v: unknown): number | null {
   const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN;
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Searches a JSON object for the first array value associated with any of the
+ * given keys, including one level of nesting.  Used to tolerate different
+ * property names across API versions (e.g. `"beats"` vs `"beat_times"`).
+ *
+ * @param source - Parsed JSON object.
+ * @param keys   - Ordered list of candidate property names.
+ * @returns First array found, or an empty array.
+ */
 function firstArray(source: Json, keys: string[]): unknown[] {
   for (const k of keys) {
     const v = source[k];
@@ -95,6 +119,14 @@ function firstArray(source: Json, keys: string[]): unknown[] {
   return [];
 }
 
+/**
+ * Searches a JSON object for the first numeric value associated with any of
+ * the given keys, including one level of nesting.
+ *
+ * @param source - Parsed JSON object.
+ * @param keys   - Ordered list of candidate property names.
+ * @returns First finite number found, or `null`.
+ */
 function firstNumber(source: Json, keys: string[]): number | null {
   for (const k of keys) {
     const n = num(source[k]);
@@ -110,6 +142,13 @@ function firstNumber(source: Json, keys: string[]): number | null {
   return null;
 }
 
+/**
+ * Parses beat and downbeat timestamps out of a tolerant JSON payload,
+ * accepting several different key names used by various ChordMini versions.
+ *
+ * @param payload - JSON object from the beats portion of the API response.
+ * @returns `{ beats, downbeats }` both as sorted number arrays (seconds).
+ */
 export function parseBeats(payload: Json): { beats: number[]; downbeats: number[] } {
   const toTime = (b: unknown): number | null => {
     if (typeof b === "number") return Number.isFinite(b) ? b : null;
@@ -133,6 +172,13 @@ export function parseBeats(payload: Json): { beats: number[]; downbeats: number[
   return { beats, downbeats };
 }
 
+/**
+ * Parses a chord event list from a tolerant JSON payload, normalising label
+ * strings and filling in missing end times from the next onset.
+ *
+ * @param payload - JSON object from the chords portion of the API response.
+ * @returns Array of `ChordEvent` objects sorted by start time.
+ */
 export function parseChords(payload: Json): ChordEvent[] {
   const raw = firstArray(payload, [
     "chords",
@@ -179,6 +225,13 @@ export function parseChords(payload: Json): ChordEvent[] {
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
 const MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.6, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17];
 
+/**
+ * Returns the pitch classes (0–11) belonging to a chord label, used for
+ * building a weighted chroma histogram during key estimation.
+ *
+ * @param label - Chord label string (e.g. `"Dm7"`).
+ * @returns Array of pitch-class integers, or empty array for unrecognised labels.
+ */
 function chordTones(label: string): number[] {
   const m = /^([A-G](?:#|b)?)(.*)$/.exec(label);
   if (!m) return [];
@@ -192,6 +245,14 @@ function chordTones(label: string): number[] {
   return tones;
 }
 
+/**
+ * Estimates the musical key (tonic pitch class + mode) from a sequence of chord
+ * events by building a duration-weighted chroma histogram and correlating it
+ * against Krumhansl-Schmuckler major/minor key profiles.
+ *
+ * @param chords - Array of `ChordEvent` objects from the analysis.
+ * @returns `{ pc, mode }` where `pc` is 0–11 (C…B) and `mode` is `"major"` or `"minor"`.
+ */
 export function estimateKeyFromChords(chords: ChordEvent[]): {
   pc: number;
   mode: "major" | "minor";
@@ -227,6 +288,13 @@ export function estimateKeyFromChords(chords: ChordEvent[]): {
 /* Normalisation into AnalysisResult                                   */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Computes the median inter-beat interval from a sorted beat array, ignoring
+ * values that are too short (< 150 ms) or too long (> 2 s) to be real beats.
+ *
+ * @param beats - Sorted array of beat timestamps in seconds.
+ * @returns Median IBI in seconds, or `null` if there are too few valid gaps.
+ */
 function medianInterval(beats: number[]): number | null {
   if (beats.length < 4) return null;
   const gaps: number[] = [];
@@ -239,6 +307,16 @@ function medianInterval(beats: number[]): number | null {
   return gaps[Math.floor(gaps.length / 2)]!;
 }
 
+/**
+ * Converts the raw JSON payloads returned by a ChordMini/TensorFlow analysis
+ * call into a normalised `AnalysisResult` object ready for the frontend.
+ *
+ * @param beatsPayload  - JSON object containing beat timestamps and optional BPM.
+ * @param chordsPayload - JSON object containing chord event segments.
+ * @param duration      - Track duration in seconds (used as fallback).
+ * @returns A fully populated `AnalysisResult`.
+ * @throws {Error} When the chord payload contains no segments.
+ */
 export function toAnalysisResult(
   beatsPayload: Json,
   chordsPayload: Json,
@@ -300,6 +378,14 @@ export function toAnalysisResult(
   };
 }
 
+/**
+ * Builds a regular beat grid spaced by `beatLen` seconds, from 0 to
+ * (but not including) `duration`.
+ *
+ * @param duration - Track duration in seconds.
+ * @param beatLen  - Inter-beat interval in seconds.
+ * @returns Array of beat timestamps in seconds.
+ */
 function buildGrid(duration: number, beatLen: number): number[] {
   const out: number[] = [];
   for (let t = 0; t < duration; t += beatLen) out.push(t);
@@ -314,6 +400,16 @@ export type ChordMiniOutcome =
   | { ok: true; analysis: AnalysisResult; models: ChordMiniModels }
   | { ok: false; reason: string };
 
+/**
+ * Uploads an audio file to the ChordMini backend endpoint, waits for the
+ * analysis to complete, and returns a normalised `AnalysisResult`.
+ *
+ * @param file     - Audio file to analyse.
+ * @param duration - Known track duration in seconds (used as a fallback).
+ * @param models   - Which beat and chord models to request from ChordMini.
+ * @returns A `ChordMiniOutcome` union: `{ ok: true, analysis, models }` on
+ *          success or `{ ok: false, reason }` on failure.
+ */
 export async function analyzeWithChordMini(
   file: File,
   duration: number,
@@ -345,6 +441,15 @@ export async function analyzeWithChordMini(
 export type TensorFlowOutcome =
   { ok: true; analysis: AnalysisResult } | { ok: false; reason: string };
 
+/**
+ * Uploads an audio file to the TensorFlow chord-model endpoint and returns
+ * a normalised `AnalysisResult`.
+ *
+ * @param file     - Audio file to analyse.
+ * @param duration - Known track duration in seconds.
+ * @returns A `TensorFlowOutcome` union: `{ ok: true, analysis }` on success
+ *          or `{ ok: false, reason }` on failure.
+ */
 export async function analyzeWithTensorFlow(
   file: File,
   duration: number,

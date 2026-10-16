@@ -52,7 +52,7 @@ CONSONANTS = {
 }
 
 try:
-    TANGLISH_LEXICON = json.loads((ROOT / "src/lib/tanglish-lexicon.json").read_text())
+    TANGLISH_LEXICON = json.loads((ROOT / "src/lib/tanglish-lexicon.json").read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError):
     TANGLISH_LEXICON = {}
 
@@ -153,22 +153,52 @@ class AppSettings(BaseModel):
 
 
 def load_app_settings() -> AppSettings:
+    """Load application configuration settings from disk.
+
+    Reads the JSON file defined by `SETTINGS_PATH`. If the file does not
+    exist, contains malformed JSON, or fails Pydantic schema validation,
+    a default instance of `AppSettings` is returned as a fallback.
+
+    Returns:
+        AppSettings: The active or default application configuration settings.
+    """
     try:
-        payload = json.loads(SETTINGS_PATH.read_text())
+        payload = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         return AppSettings.model_validate(payload)
     except (OSError, json.JSONDecodeError, ValueError):
         return AppSettings()
 
 
 def save_app_settings(settings: AppSettings) -> AppSettings:
+    """Atomically persist application configuration settings to disk.
+
+    Writes the serialized JSON settings to a temporary file (`.tmp`) and
+    atomically replaces the destination file to prevent partial file writes
+    or corruption during server crashes or concurrent writes.
+
+    Args:
+        settings: The updated AppSettings instance to save.
+
+    Returns:
+        AppSettings: The saved AppSettings instance.
+    """
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = SETTINGS_PATH.with_suffix(".tmp")
-    temporary.write_text(json.dumps(settings.model_dump(mode="json"), indent=2) + "\n")
+    temporary.write_text(json.dumps(settings.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8")
     temporary.replace(SETTINGS_PATH)
     return settings
 
 
 def _connect_database() -> sqlite3.Connection:
+    """Establish and configure an SQLite database connection.
+
+    Ensures the parent directory exists, connects to SQLite with a 10-second
+    busy timeout, sets the row factory to `sqlite3.Row` for dict-like
+    column access, and enables foreign key constraints.
+
+    Returns:
+        sqlite3.Connection: The configured SQLite connection.
+    """
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
@@ -177,6 +207,18 @@ def _connect_database() -> sqlite3.Connection:
 
 
 def _hash_password(password: str) -> str:
+    """Securely hash a plaintext password using PBKDF2-HMAC-SHA256.
+
+    Generates a cryptographically random 16-byte salt, applies 420,000 iterations
+    of PBKDF2 with SHA-256 (following modern OWASP guidelines), and encodes the
+    parameters into a standardized delimited string.
+
+    Args:
+        password: The plaintext password string to hash.
+
+    Returns:
+        str: Delimited string with algorithm, iteration count, base64 salt, and base64 hash.
+    """
     salt = secrets.token_bytes(16)
     iterations = 420_000
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
@@ -189,6 +231,19 @@ def _hash_password(password: str) -> str:
 
 
 def _verify_password(password: str, stored: str) -> bool:
+    """Verify a plaintext password against a stored PBKDF2 password hash.
+
+    Parses the algorithm, iteration count, salt, and expected hash from the stored
+    string, re-computes the hash using the candidate password, and compares them
+    using constant-time string comparison (`hmac.compare_digest`) to prevent timing attacks.
+
+    Args:
+        password: The plaintext candidate password provided during login.
+        stored: The previously computed hash string stored in the database.
+
+    Returns:
+        bool: True if the password matches, False otherwise.
+    """
     try:
         algorithm, rounds, salt, expected = stored.split("$", 3)
         if algorithm != "pbkdf2_sha256":
@@ -202,6 +257,13 @@ def _verify_password(password: str, stored: str) -> bool:
 
 
 def _initialize_auth_database() -> None:
+    """Initialize SQLite database tables and default administrator account.
+
+    Creates the `accounts` and `sessions` tables if they do not already exist.
+    If `ADMIN_PASSWORD` and `ADMIN_USERNAME` environment variables are present and
+    no admin account exists in the database, automatically provisions the initial
+    administrator credentials.
+    """
     with _connect_database() as connection:
         connection.execute(
             """CREATE TABLE IF NOT EXISTS accounts (
@@ -234,6 +296,19 @@ def _initialize_auth_database() -> None:
 
 
 def _issue_session(account_id: str, replace_existing: bool = False) -> str:
+    """Issue a new bearer session token for an authenticated account.
+
+    Generates a secure random 36-byte URL-safe string token, stores its SHA-256
+    hash in the sessions table (to prevent token theft if the database is leaked),
+    and optionally invalidates previous sessions for that account.
+
+    Args:
+        account_id: The unique primary key ID of the authenticated account.
+        replace_existing: If True, deletes all prior sessions for this account.
+
+    Returns:
+        str: The unhashed plaintext bearer token to return to the client.
+    """
     token = secrets.token_urlsafe(36)
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with _connect_database() as connection:
@@ -247,6 +322,17 @@ def _issue_session(account_id: str, replace_existing: bool = False) -> str:
 
 
 def _account_for_token(token: str) -> sqlite3.Row | None:
+    """Look up an account associated with a given plaintext bearer token.
+
+    Hashes the incoming bearer token with SHA-256 and queries the database
+    by joining `sessions` and `accounts`.
+
+    Args:
+        token: The plaintext bearer token passed in the Authorization header.
+
+    Returns:
+        sqlite3.Row | None: The matching account record, or None if invalid or expired.
+    """
     _initialize_auth_database()
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with _connect_database() as connection:
@@ -259,6 +345,20 @@ def _account_for_token(token: str) -> sqlite3.Row | None:
 
 
 def require_account(authorization: str | None = Header(default=None)) -> sqlite3.Row:
+    """FastAPI dependency to extract and validate the current account from Authorization header.
+
+    Expects an `Authorization: Bearer <token>` header, verifies the token against
+    active sessions in SQLite, and returns the account row.
+
+    Args:
+        authorization: The Authorization HTTP header string.
+
+    Returns:
+        sqlite3.Row: The authenticated account database row.
+
+    Raises:
+        HTTPException: 401 Unauthorized if the header is missing, malformed, or session invalid.
+    """
     token = authorization.removeprefix("Bearer ") if authorization else ""
     if not token:
         raise HTTPException(401, "Sign in to continue")
@@ -269,18 +369,49 @@ def require_account(authorization: str | None = Header(default=None)) -> sqlite3
 
 
 def require_admin(account: sqlite3.Row = Depends(require_account)) -> sqlite3.Row:
+    """FastAPI dependency ensuring the requesting user has administrator privileges.
+
+    Args:
+        account: The authenticated account row provided by `require_account`.
+
+    Returns:
+        sqlite3.Row: The admin account database row.
+
+    Raises:
+        HTTPException: 403 Forbidden if the account role is not 'admin'.
+    """
     if account["kind"] != "admin":
         raise HTTPException(403, "Administrator access required")
     return account
 
 
 def require_user(account: sqlite3.Row = Depends(require_account)) -> sqlite3.Row:
+    """FastAPI dependency ensuring the requesting user has regular user privileges.
+
+    Args:
+        account: The authenticated account row provided by `require_account`.
+
+    Returns:
+        sqlite3.Row: The user account database row.
+
+    Raises:
+        HTTPException: 403 Forbidden if the account role is not 'user'.
+    """
     if account["kind"] != "user":
         raise HTTPException(403, "User account required")
     return account
 
 
 def _session_response(account: sqlite3.Row, token: str) -> dict:
+    """Format an authentication response dictionary containing the token and user identity.
+
+    Args:
+        account: The account database row containing id, kind, email, or username.
+        token: The newly issued plaintext bearer session token.
+
+    Returns:
+        dict: Response object containing the bearer token and account details.
+    """
     identity = {"id": account["id"], "role": account["kind"]}
     if account["email"]:
         identity["email"] = account["email"]
@@ -290,11 +421,34 @@ def _session_response(account: sqlite3.Row, token: str) -> dict:
 
 
 def require_feature(feature: str) -> None:
+    """FastAPI helper to verify whether an application feature is currently enabled.
+
+    Reads the feature toggle from dynamic application settings. If the admin
+    has disabled this feature, halts the request with HTTP 503.
+
+    Args:
+        feature: The name of the attribute in `FeatureFlags` (e.g. 'stem_separation').
+
+    Raises:
+        HTTPException: 503 Service Unavailable if the feature is disabled.
+    """
     if not getattr(load_app_settings().features, feature):
         raise HTTPException(503, f"{feature.replace('_', ' ').capitalize()} is paused by the administrator")
 
 
 def _unwrap_result(payload: object, keys: tuple[str, ...]) -> dict:
+    """Normalize inconsistent or nested API response formats into a standardized dictionary.
+
+    Unwraps payload arrays into a `results` dictionary, or extracts the first
+    matching candidate key from a nested response object.
+
+    Args:
+        payload: The raw response data from an external service or endpoint.
+        keys: A tuple of key names to check for list values in priority order.
+
+    Returns:
+        dict: Normalized dictionary structure with the unwrapped data.
+    """
     if isinstance(payload, list):
         return {"results": payload}
     if not isinstance(payload, dict):
@@ -314,6 +468,27 @@ async def _call_chordmini(
     model: str,
     app_check: str | None,
 ) -> object:
+    """Send an asynchronous multipart audio upload request to the ChordMini service.
+
+    Attaches optional Firebase AppCheck tokens and detector/model specifications,
+    handles rate-limiting (HTTP 429), and parses error payloads.
+
+    Args:
+        client: Async HTTPX client instance.
+        base: The base URL of the ChordMini server.
+        path: The API route path (e.g. '/api/detect-beats' or '/api/recognize-chords').
+        audio: Raw bytes of the audio file to analyze.
+        filename: Original or default name for the multipart file upload.
+        model: Model identifier requested (e.g. 'chord-cnn-lstm').
+        app_check: Optional Firebase App Check token string.
+
+    Returns:
+        object: Parsed JSON response from the ChordMini endpoint.
+
+    Raises:
+        HTTPException: 429 if rate limited by ChordMini.
+        RuntimeError: If ChordMini returns an error status code or failure payload.
+    """
     data = {"detector": model, "model": model} if model else {}
     headers = {"X-Firebase-AppCheck": app_check} if app_check else {}
     response = await client.post(
@@ -340,11 +515,30 @@ async def _call_chordmini(
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    """Health check endpoint to verify that the FastAPI server is running.
+
+    Returns:
+        dict[str, str]: Service status dictionary.
+    """
     return {"status": "ok", "service": "ChordLab API"}
 
 
 @app.post("/api/auth/register")
 async def register_user(credentials: UserCredentials) -> dict:
+    """Register a new user account with email and password.
+
+    Validates email format, verifies uniqueness in the database, securely hashes
+    the password with PBKDF2-SHA256, and returns a new session bearer token.
+
+    Args:
+        credentials: UserCredentials containing email and password.
+
+    Returns:
+        dict: Session payload with bearer token and account details.
+
+    Raises:
+        HTTPException: 422 if email format is invalid, 409 if email already registered.
+    """
     email = credentials.email.strip().lower()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         raise HTTPException(422, "Enter a valid email address")
@@ -367,6 +561,19 @@ async def register_user(credentials: UserCredentials) -> dict:
 
 @app.post("/api/auth/login")
 async def login_user(credentials: UserCredentials) -> dict:
+    """Authenticate an existing user with email and password.
+
+    Validates credentials against stored PBKDF2 password hashes and creates a new session.
+
+    Args:
+        credentials: UserCredentials containing email and password.
+
+    Returns:
+        dict: Session payload with bearer token and account details.
+
+    Raises:
+        HTTPException: 401 Unauthorized if email or password does not match.
+    """
     _initialize_auth_database()
     email = credentials.email.strip().lower()
     with _connect_database() as connection:
@@ -381,6 +588,20 @@ async def login_user(credentials: UserCredentials) -> dict:
 
 @app.post("/api/admin/login")
 async def login_admin(credentials: AdminCredentials) -> dict:
+    """Authenticate the system administrator using username and password.
+
+    Verifies against the admin credentials provisioned from environment variables,
+    invalidating any prior admin sessions to enforce single active session security.
+
+    Args:
+        credentials: AdminCredentials containing username and password.
+
+    Returns:
+        dict: Session payload with admin bearer token and identity.
+
+    Raises:
+        HTTPException: 503 if ADMIN_PASSWORD is unset, 401 if credentials incorrect.
+    """
     _initialize_auth_database()
     if not os.getenv("ADMIN_PASSWORD"):
         raise HTTPException(503, "Set ADMIN_PASSWORD on the FastAPI server before admin sign-in")
@@ -397,6 +618,14 @@ async def login_admin(credentials: AdminCredentials) -> dict:
 
 @app.get("/api/auth/me")
 async def current_user(account: sqlite3.Row = Depends(require_user)) -> dict:
+    """Retrieve identity and profile details of the currently authenticated user.
+
+    Args:
+        account: Authenticated account dependency row.
+
+    Returns:
+        dict: Dictionary containing id, email, and role.
+    """
     return {"id": account["id"], "email": account["email"], "role": "user"}
 
 
@@ -405,6 +634,15 @@ async def logout(
     authorization: str | None = Header(default=None),
     account: sqlite3.Row = Depends(require_account),
 ) -> dict[str, bool]:
+    """Invalidate and remove the caller's active bearer session token from SQLite.
+
+    Args:
+        authorization: Authorization header containing the active bearer token.
+        account: Authenticated account dependency row.
+
+    Returns:
+        dict[str, bool]: Acknowledgement dictionary `{"ok": True}`.
+    """
     token = authorization.removeprefix("Bearer ") if authorization else ""
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     with _connect_database() as connection:
@@ -414,20 +652,48 @@ async def logout(
 
 @app.get("/api/public-config")
 async def public_config() -> dict:
+    """Retrieve public application configuration and feature flags for frontend bootstrap.
+
+    Returns:
+        dict: Full serialized AppSettings object.
+    """
     return load_app_settings().model_dump(mode="json")
 
 
 @app.get("/api/admin/settings", dependencies=[Depends(require_admin)])
 async def admin_settings() -> dict:
+    """Retrieve full application settings for the administrative control panel.
+
+    Returns:
+        dict: Full serialized AppSettings object.
+    """
     return load_app_settings().model_dump(mode="json")
 
 
 @app.put("/api/admin/settings", dependencies=[Depends(require_admin)])
 async def update_admin_settings(settings: AppSettings) -> dict:
+    """Update and persist application configuration settings from the admin panel.
+
+    Args:
+        settings: Modified AppSettings payload.
+
+    Returns:
+        dict: Updated serialized AppSettings object.
+    """
     return save_app_settings(settings).model_dump(mode="json")
 
 
 async def _probe_service(client: httpx.AsyncClient, name: str, url: str) -> dict[str, str]:
+    """Test responsiveness and availability of an external dependency via HTTP GET.
+
+    Args:
+        client: Async HTTPX client.
+        name: Human-readable service name (e.g. 'ChordMini', 'AI provider').
+        url: Endpoint URL to probe.
+
+    Returns:
+        dict[str, str]: Probe status report with name, status ('healthy', 'degraded', 'unavailable'), and detail.
+    """
     try:
         response = await client.get(url)
         status = "healthy" if response.status_code < 500 else "degraded"
@@ -438,6 +704,18 @@ async def _probe_service(client: httpx.AsyncClient, name: str, url: str) -> dict
 
 @app.get("/api/admin/health", dependencies=[Depends(require_admin)])
 async def admin_health() -> dict:
+    """Perform a comprehensive system health check across local and remote integrations.
+
+    Evaluates:
+    - ChordLab API process state
+    - Local TensorFlow chord model availability
+    - Remote ChordMini service availability
+    - AI provider connectivity (OpenAI / compatible)
+    - Demucs package installation for stem separation
+
+    Returns:
+        dict: Detailed health probe checks and active feature flags.
+    """
     settings = load_app_settings()
     checks = [{"name": "ChordLab API", "status": "healthy", "detail": "API process is responding"}]
     if settings.features.tensorflow_analysis:
@@ -468,6 +746,18 @@ async def chordmini(
     beatModel: str = Form(default="auto"),
     chordModel: str = Form(default="chord-cnn-lstm"),
 ) -> dict:
+    """Forward uploaded audio to remote ChordMini service for beat tracking and chord recognition.
+
+    Performs parallel requests for beat detection and chord recognition, normalizing results.
+
+    Args:
+        file: Multipart audio file upload.
+        beatModel: Beat detection model selection ('auto', 'madmom', 'beat-transformer').
+        chordModel: Chord recognition model selection ('chord-cnn-lstm').
+
+    Returns:
+        dict: Normalized beats and chord sequence predictions.
+    """
     require_feature("song_analysis")
     require_feature("chordmini_analysis")
     audio = await file.read(MAX_ANALYSIS_BYTES + 1)
@@ -502,6 +792,20 @@ async def chordmini(
 
 @app.post("/api/chord-model", dependencies=[Depends(require_user)])
 async def chord_model(file: UploadFile = File(...)) -> dict:
+    """Analyze uploaded audio using the local offline TensorFlow CNN chord model.
+
+    Executes feature extraction (chroma STFT) and deep neural network inference
+    in a background thread pool to avoid blocking the asyncio event loop.
+
+    Args:
+        file: UploadFile containing raw audio data.
+
+    Returns:
+        dict: Detected chord segments with timestamps and confidence scores.
+
+    Raises:
+        HTTPException: 400 for audio validation issues, 503 if model is unavailable.
+    """
     require_feature("song_analysis")
     require_feature("tensorflow_analysis")
     audio = await file.read(MAX_ANALYSIS_BYTES + 1)
@@ -527,6 +831,16 @@ async def chord_model(file: UploadFile = File(...)) -> dict:
 
 
 def _note_id(root: str) -> str:
+    """Format a chord root note name to match external chords API naming conventions.
+
+    Converts accidentals like 'C#' to 'c_sharp' and 'Bb' to 'b_flat'.
+
+    Args:
+        root: Root note string (e.g. 'C#', 'Bb', 'G').
+
+    Returns:
+        str: Formatted note identifier (e.g. 'c_sharp', 'b_flat', 'g').
+    """
     normalized = root.lower()
     if len(normalized) == 2 and normalized[1] == "#":
         return f"{normalized[0]}_sharp"
@@ -537,6 +851,17 @@ def _note_id(root: str) -> str:
 
 @app.get("/api/chords", dependencies=[Depends(require_user)])
 async def chord_catalog(label: str = "") -> dict:
+    """Look up comprehensive guitar and piano chord diagrams from the remote chord catalog.
+
+    Args:
+        label: Standard chord symbol string (e.g. 'C', 'Am', 'G7').
+
+    Returns:
+        dict: Matched chord definition and fretboard/keyboard positions, or None.
+
+    Raises:
+        HTTPException: 400 if label syntax is invalid.
+    """
     require_feature("chord_diagrams")
     match = re.fullmatch(r"([A-Ga-g](?:#|b)?)(.*)", label)
     if not match:
@@ -572,6 +897,21 @@ async def chord_catalog(label: str = "") -> dict:
 
 
 def _separate_audio(audio: bytes, filename: str) -> bytes:
+    """Execute Demucs deep learning stem separation on an audio file in a temporary sandbox.
+
+    Runs `demucs_cpu.py` to isolate 4 audio stems (vocals, drums, bass, other)
+    and packages the resulting WAV files into a compressed ZIP archive.
+
+    Args:
+        audio: Raw bytes of the audio file to separate.
+        filename: Original filename used to preserve file extensions.
+
+    Returns:
+        bytes: Raw bytes of the generated ZIP archive containing the 4 WAV stems.
+
+    Raises:
+        RuntimeError: If Demucs execution fails or stems are missing.
+    """
     with tempfile.TemporaryDirectory(prefix="chordlab-demucs-") as work_dir:
         work = Path(work_dir)
         safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(filename or "audio.mp3").name)
@@ -608,6 +948,20 @@ def _separate_audio(audio: bytes, filename: str) -> bytes:
 
 @app.post("/api/separate", dependencies=[Depends(require_user)])
 async def separate(file: UploadFile = File(...)):
+    """Stem separation endpoint extracting vocals, drums, bass, and other instruments.
+
+    Uses Facebook Research's Demucs model to separate audio into 4 stems and
+    streams back a ZIP archive.
+
+    Args:
+        file: Multipart audio upload (up to 50 MB).
+
+    Returns:
+        Response: ZIP archive download with content-type `application/zip`.
+
+    Raises:
+        HTTPException: 400 for size/format issues, 502 for separation failures.
+    """
     require_feature("stem_separation")
     from fastapi.responses import Response
 
@@ -625,6 +979,20 @@ async def separate(file: UploadFile = File(...)):
 
 @app.post("/api/import-link", dependencies=[Depends(require_user)])
 async def import_link(data: LinkImport) -> dict:
+    """Fetch track metadata (title, artist, artwork) from YouTube or Spotify links via oEmbed.
+
+    Cleans up noisy video titles (removing '(Official Video)', '[HD]', etc.) and
+    extracts artist/track pairs.
+
+    Args:
+        data: LinkImport payload with the song URL.
+
+    Returns:
+        dict: Metadata dictionary containing source, title, artist, thumbnail, and url.
+
+    Raises:
+        HTTPException: 400 if URL is unsupported or inaccessible.
+    """
     require_feature("link_import")
     url = str(data.url)
     host = (urlsplit(url).hostname or "").removeprefix("www.").lower()
@@ -658,6 +1026,17 @@ async def import_link(data: LinkImport) -> dict:
 
 
 def _parse_lrc(lrc: str) -> list[dict]:
+    """Parse LRC (standard synchronized lyric format) timestamps into seconds and text lines.
+
+    Converts patterns like `[01:23.45] lyric line` into structured dictionaries
+    `{"time": 83.45, "text": "lyric line"}` sorted in chronological order.
+
+    Args:
+        lrc: Raw LRC formatted lyric string.
+
+    Returns:
+        list[dict]: Sorted list of timestamped lyric lines.
+    """
     lines = []
     for raw in lrc.replace("\r", "").split("\n"):
         stamps = list(LRC_STAMP.finditer(raw))
@@ -674,6 +1053,17 @@ def _parse_lrc(lrc: str) -> list[dict]:
 
 @app.post("/api/lyrics", dependencies=[Depends(require_user)])
 async def fetch_lyrics(data: LyricsLookup) -> dict:
+    """Search for synchronized (LRC) and plain text lyrics from lrclib.net.
+
+    Ranks candidate search results based on presence of synced timestamps,
+    plain lyrics, and track duration match.
+
+    Args:
+        data: LyricsLookup payload containing track title, optional artist, and duration.
+
+    Returns:
+        dict: Dictionary containing `found` flag, plain lyrics, and synchronized timeline.
+    """
     require_feature("lyrics_lookup")
     params = {"track_name": data.title.strip()}
     if data.artist and data.artist.strip():
@@ -691,6 +1081,7 @@ async def fetch_lyrics(data: LyricsLookup) -> dict:
         return {"found": False, "plain": "", "synced": []}
 
     def score(hit: dict) -> float:
+        """Score candidate lyric matches based on synced availability and song duration proximity."""
         value = 10 if hit.get("syncedLyrics") else 0
         value += 2 if hit.get("plainLyrics") else 0
         if data.duration and hit.get("duration"):
@@ -709,6 +1100,17 @@ async def fetch_lyrics(data: LyricsLookup) -> dict:
 
 
 def _tanglish_word(word: str) -> str:
+    """Transliterate a single Tamil word into phonetic Tanglish (Roman script).
+
+    Checks the offline colloquial dictionary first; if not found, applies phonetic
+    character mapping across Tamil vowels, consonants, and diacritic signs.
+
+    Args:
+        word: Tamil word with potential leading or trailing punctuation.
+
+    Returns:
+        str: Transliterated Romanized English/Tanglish word.
+    """
     core = re.sub(r"^[^\u0b80-\u0bff]+|[^\u0b80-\u0bff]+$", "", word)
     known = TANGLISH_LEXICON.get(core)
     if known:
@@ -728,6 +1130,16 @@ def _tanglish_word(word: str) -> str:
 
 
 def _offline_tanglish(lyrics: str) -> str:
+    """Perform fast, local offline rule-based transliteration of Tamil lyrics into Tanglish.
+
+    Preserves section headers (e.g. `[Chorus]`) and non-Tamil lines.
+
+    Args:
+        lyrics: Raw multi-line Tamil lyrics.
+
+    Returns:
+        str: Transliterated Tanglish lyrics.
+    """
     output = []
     for line in lyrics.split("\n"):
         if line.lstrip().startswith("[") or not TAMIL_RE.search(line):
@@ -739,6 +1151,20 @@ def _offline_tanglish(lyrics: str) -> str:
 
 @app.post("/api/romanize", dependencies=[Depends(require_user)])
 async def romanize(data: RomanizeRequest) -> dict[str, str]:
+    """Transliterate Indic lyrics (Tamil/Hindi) into Roman script (Tanglish/Hinglish) or English.
+
+    Uses OpenAI/compatible chat completions for high-quality natural transliteration,
+    with automatic offline fallback for Tamil text when no AI API key is configured.
+
+    Args:
+        data: RomanizeRequest specifying raw lyrics and target style ('tanglish', 'hinglish', 'auto', 'english').
+
+    Returns:
+        dict[str, str]: Transliterated lyrics text `{"text": ...}`.
+
+    Raises:
+        HTTPException: 503 if unconfigured, 429 if rate limited, 502 on upstream failure.
+    """
     require_feature("lyric_romanization")
     tamil = bool(TAMIL_RE.search(data.lyrics)) and data.style != "english"
     fallback = _offline_tanglish(data.lyrics) if tamil else None

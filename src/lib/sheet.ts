@@ -31,6 +31,14 @@ const BRACKET_SECTION_RE = /^\s*[[(]\s*([^\]\n)]{1,40})\s*[\])]\s*:?\s*$/;
 /** Bare marker on its own line, e.g. "Chorus:" or "Verse 2". */
 const BARE_SECTION_RE = new RegExp(`^\\s*(${SECTION_WORDS})\\s*\\d{0,2}\\s*:?\\s*$`, "i");
 
+/**
+ * Extracts a human-readable section name from a line of text.
+ * Recognises both bracketed markers (e.g. `[Chorus 2]`) and bare labels
+ * (e.g. `Verse:`) listed in `SECTION_WORDS`.
+ *
+ * @param line - A single line of raw text.
+ * @returns Title-cased section name, or `null` if the line is not a section header.
+ */
 function sectionNameOf(line: string): string | null {
   const bracket = BRACKET_SECTION_RE.exec(line);
   if (bracket) return titleCase(bracket[1]!.trim());
@@ -39,6 +47,11 @@ function sectionNameOf(line: string): string | null {
   return null;
 }
 
+/**
+ * Returns `true` when the line is a recognised song-section header.
+ *
+ * @param line - Text line to check.
+ */
 function isSectionLine(line: string): boolean {
   return sectionNameOf(line) !== null;
 }
@@ -55,6 +68,14 @@ export function condenseChords(events: ChordEvent[]): ChordEvent[] {
   return out;
 }
 
+/**
+ * Splits a multi-line lyric string into named blocks (sections), grouping
+ * non-empty lines into sequential parts.  Blank lines act as section separators
+ * when no explicit header is present.
+ *
+ * @param lyrics - Raw lyric text (may include section markers).
+ * @returns Array of `{ name, lines }` objects, one per detected block.
+ */
 function splitBlocks(lyrics: string): { name: string; lines: string[] }[] {
   const blocks: { name: string; lines: string[] }[] = [];
   let current: { name: string; lines: string[] } | null = null;
@@ -82,11 +103,26 @@ function splitBlocks(lyrics: string): { name: string; lines: string[] }[] {
   return blocks.filter((b) => b.lines.length > 0);
 }
 
+/**
+ * Converts a string to title case (first letter of each word uppercased, rest
+ * lower-cased), suitable for section header display.
+ *
+ * @param s - Input string.
+ * @returns Title-cased version of `s`.
+ */
 function titleCase(s: string) {
   return s.replace(/\w\S*/g, (t) => t.charAt(0).toUpperCase() + t.slice(1).toLowerCase());
 }
 
 /** Snap a column to the nearest word start so chords sit above syllables. */
+/**
+ * Snaps a character-column position to the nearest word-start in `line` so
+ * that chord labels are printed above syllable boundaries rather than mid-word.
+ *
+ * @param line - The lyric line text.
+ * @param col  - Desired character column.
+ * @returns Column of the nearest word-start (or `col` if no words are found).
+ */
 function snapToWord(line: string, col: number): number {
   if (col <= 0) return 0;
   if (col >= line.length) return line.length;
@@ -106,10 +142,26 @@ export interface SyncedLyricLine {
   text: string;
 }
 
+/**
+ * Strips non-letter/non-digit characters and lowercases a string so that two
+ * slightly different representations of the same lyric line can be compared.
+ *
+ * @param s - Input string.
+ * @returns Normalised string for fuzzy matching.
+ */
 function normalizeForMatch(s: string) {
   return s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
+/**
+ * Computes a similarity score (0–1) between two lyric strings.  An exact
+ * match scores 1; prefix matches score 0.9; character-overlap gives a partial
+ * score proportional to shared unique characters.
+ *
+ * @param left  - First lyric string.
+ * @param right - Second lyric string.
+ * @returns Similarity score between 0 (no match) and 1 (identical).
+ */
 function lyricMatchScore(left: string, right: string): number {
   const a = normalizeForMatch(left);
   const b = normalizeForMatch(right);
@@ -300,12 +352,29 @@ function instrumentalSheet(analysis: AnalysisResult, chords: ChordEvent[]): Shee
   return { sections: [{ name: "Progression", lines }] };
 }
 
+/**
+ * Splits an array into consecutive chunks of at most `size` elements.
+ *
+ * @param arr  - Source array.
+ * @param size - Maximum chunk length.
+ * @returns Array of sub-arrays.
+ */
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
 
+/**
+ * Renders a single chord line to a plain-text string with transposition applied.
+ * Each chord is padded with spaces so that its column position (`c.pos`) is
+ * preserved in a monospaced context.
+ *
+ * @param chords    - Array of `SheetChord` items with column positions.
+ * @param semitones - Transposition in semitones.
+ * @param useFlats  - When `true`, use flat note names.
+ * @returns Formatted chord line string, trailing spaces trimmed.
+ */
 export function chordLineToText(chords: SheetChord[], semitones: number, useFlats: boolean) {
   let out = "";
   for (const c of chords) {
@@ -326,6 +395,15 @@ export interface SheetTextOptions {
   showRoman: boolean;
 }
 
+/**
+ * Serialises a `Sheet` to a human-readable plain-text chord sheet, including
+ * a header with title, artist, key, tempo, and capo information.
+ * Optionally appends Roman-numeral lines.
+ *
+ * @param sheet - The structured `Sheet` to serialise.
+ * @param o     - Display options (title, artist, key, bpm, capo, transpose, etc.).
+ * @returns Multi-line plain-text string suitable for printing or copying.
+ */
 export function sheetToText(sheet: Sheet, o: SheetTextOptions): string {
   const head = [
     o.title || "Untitled",
@@ -348,6 +426,15 @@ export function sheetToText(sheet: Sheet, o: SheetTextOptions): string {
   return [...head, ...body].join("\n");
 }
 
+/**
+ * Collects the unique set of (possibly transposed) chord labels used anywhere
+ * in a sheet, in insertion order.
+ *
+ * @param sheet     - Sheet to inspect.
+ * @param semitones - Transposition in semitones.
+ * @param useFlats  - When `true`, spell roots with flats.
+ * @returns Deduplicated array of chord label strings.
+ */
 export function uniqueChords(sheet: Sheet, semitones: number, useFlats: boolean): string[] {
   const set = new Set<string>();
   for (const s of sheet.sections)

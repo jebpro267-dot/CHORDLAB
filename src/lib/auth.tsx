@@ -21,6 +21,16 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+/**
+ * Sends a sign-in or register request to the given backend path and stores
+ * the returned JWT token and account record in `localStorage`.
+ *
+ * @param path     - Backend API path (`/api/auth/login` or `/api/auth/register`).
+ * @param email    - User's email address.
+ * @param password - User's password.
+ * @returns The authenticated `UserAccount` on success.
+ * @throws {Error} With a human-readable message when the server rejects the credentials.
+ */
 async function submitCredentials(path: string, email: string, password: string) {
   const response = await fetch(backendUrl(path), {
     method: "POST",
@@ -88,16 +98,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  /**
+   * Signs in with the given credentials.  On success, updates the React state
+   * so that all consumers immediately see the authenticated account.
+   *
+   * @param email    - User's email address.
+   * @param password - User's password.
+   */
   async function signIn(email: string, password: string) {
     const profile = await submitCredentials("/api/auth/login", email, password);
     setAccount(profile);
   }
 
+  /**
+   * Creates a new account with the given credentials and immediately signs in.
+   *
+   * @param email    - User's desired email address.
+   * @param password - User's chosen password.
+   */
   async function register(email: string, password: string) {
     const profile = await submitCredentials("/api/auth/register", email, password);
     setAccount(profile);
   }
 
+  /**
+   * Revokes the server-side session (best-effort) and clears all local auth
+   * state.  The user is signed out even if the revocation request fails.
+   */
   async function signOut() {
     const token = localStorage.getItem(TOKEN_KEY);
     try {
@@ -123,6 +150,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * React hook that returns the current `AuthContextValue`.
+ * Must be called inside an `<AuthProvider>` tree; throws if the context is missing.
+ *
+ * @returns The auth context containing `account`, `ready`, `signIn`, `register`,
+ *          and `signOut`.
+ * @throws {Error} When used outside of `<AuthProvider>`.
+ */
 export function useAuth(): AuthContextValue {
   const context = useContext(AuthContext);
   if (!context) throw new Error("useAuth must be used inside AuthProvider");

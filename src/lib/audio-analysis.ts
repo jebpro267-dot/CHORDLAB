@@ -117,6 +117,14 @@ interface Template {
   intervals: number[];
 }
 
+/**
+ * Builds the full chord template matrix (one normalised chroma vector per
+ * root × quality combination, 12 × 11 = 132 templates total).  Each template
+ * weights the root pitch class 15 % higher than the other chord tones so the
+ * root asserts itself in the similarity calculation.
+ *
+ * @returns Array of `Template` objects used by the chord recogniser.
+ */
 function buildTemplates(): Template[] {
   const out: Template[] = [];
   for (let root = 0; root < 12; root++) {
@@ -160,6 +168,13 @@ const N_NOTES = 84;
 const BPS = 3;
 const N_LOG = N_NOTES * BPS;
 
+/**
+ * Converts a multi-channel `AudioBuffer` to a mono Float32 signal by averaging
+ * all channels, ready for downstream spectral analysis.
+ *
+ * @param buffer - Decoded audio buffer (any number of channels).
+ * @returns Mono signal as a `Float32Array` with the same length as the buffer.
+ */
 function downmix(buffer: AudioBuffer): Float32Array {
   const len = buffer.length;
   const out = new Float32Array(len);
@@ -172,6 +187,13 @@ function downmix(buffer: AudioBuffer): Float32Array {
   return out;
 }
 
+/**
+ * Computes a Hann (raised-cosine) analysis window of length `n`, used to
+ * reduce spectral leakage at frame boundaries.
+ *
+ * @param n - Window length in samples.
+ * @returns `Float32Array` of Hann window coefficients in the range [0, 1].
+ */
 function hann(n: number): Float32Array {
   const w = new Float32Array(n);
   for (let i = 0; i < n; i++) w[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
@@ -267,6 +289,13 @@ function computeSpectrogram(signal: Float32Array, sampleRate: number): Spectro {
 /* Harmonic / percussive source separation (median filtering, HPSS)     */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Returns the median of an array of numbers.  The array is sorted in-place
+ * (on a copy), so the original order is preserved.
+ *
+ * @param values - Numeric array (may be empty).
+ * @returns Median value, or 0 for an empty array.
+ */
 function median(values: number[]): number {
   if (values.length === 0) return 0;
   const a = values.slice().sort((x, y) => x - y);
@@ -436,6 +465,15 @@ function chromaFromNotes(notes: Float32Array, loMidi: number, hiMidi: number): F
 /* Tempo + dynamic-programming beat tracking (Ellis)                    */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Computes a causal moving average of a signal with window size `w`.
+ * Frames at the beginning (where fewer than `w` samples are available) use
+ * the available count instead.
+ *
+ * @param x - Input signal.
+ * @param w - Window size in samples.
+ * @returns Smoothed signal of the same length.
+ */
 function movingAverage(x: Float32Array, w: number): Float32Array {
   const out = new Float32Array(x.length);
   let sum = 0;
@@ -486,6 +524,14 @@ function fineNovelty(
   return { nov: noveltyCurve(flux), frameTime: FINE_HOP / sampleRate };
 }
 
+/**
+ * Post-processes a raw spectral flux curve into a normalised onset novelty
+ * curve by subtracting a local moving average (adaptive thresholding) and
+ * half-wave rectifying, then normalising to the range [0, 1].
+ *
+ * @param onset - Raw per-frame spectral flux values.
+ * @returns Normalised novelty curve of the same length.
+ */
 function noveltyCurve(onset: Float32Array): Float32Array {
   const mean = movingAverage(onset, 32);
   const nov = new Float32Array(onset.length);
@@ -498,6 +544,16 @@ function noveltyCurve(onset: Float32Array): Float32Array {
   return nov;
 }
 
+/**
+ * Estimates tempo (BPM) from an onset novelty curve by evaluating the
+ * autocorrelation at beat-period lags from 55 to 200 BPM.  Half/double-time
+ * lags are also scored at 50 % weight to reduce octave errors.  A Gaussian
+ * prior centred on 118 BPM gently nudges ambiguous results toward common tempos.
+ *
+ * @param nov       - Normalised onset novelty curve.
+ * @param frameTime - Hop duration in seconds per novelty frame.
+ * @returns Estimated tempo in BPM, rounded to one decimal place.
+ */
 function estimateTempo(nov: Float32Array, frameTime: number): number {
   let bestBpm = 120;
   let bestScore = -Infinity;
@@ -656,6 +712,15 @@ function keyFromChords(labels: string[], weights: number[]): { pc: number; mode:
   return { pc: best.pc, mode: best.mode };
 }
 
+/**
+ * Averages the chroma vectors over a frame range `[from, to)`, returning a
+ * unit-normalised vector.  Used to compute mean chroma per beat.
+ *
+ * @param chroma - Array of per-frame chroma vectors.
+ * @param from   - Inclusive start frame index.
+ * @param to     - Exclusive end frame index.
+ * @returns Normalised average chroma vector of length 12.
+ */
 function averageChroma(chroma: Float32Array[], from: number, to: number): Float32Array {
   const out = new Float32Array(12);
   const a = Math.max(0, from);
@@ -687,6 +752,14 @@ function medianChroma(chroma: Float32Array[], from: number, to: number): Float32
   return out;
 }
 
+/**
+ * Computes the cosine similarity between two 12-element chroma vectors.
+ * Returns 0 when either vector is all-zeros.
+ *
+ * @param a - First chroma vector.
+ * @param b - Second chroma vector.
+ * @returns Cosine similarity in the range [-1, 1].
+ */
 function cosine(a: Float32Array, b: Float32Array): number {
   let dot = 0;
   let na = 0;
@@ -756,6 +829,14 @@ function temporalSmooth(vecs: Float32Array[], w = 0.35): Float32Array[] {
 }
 
 
+/**
+ * Finds the best matching chord template for a chroma vector using cosine
+ * similarity, then returns "N" (no chord) when the overall chroma energy is
+ * below a minimal threshold.
+ *
+ * @param vec - Normalised 12-element chroma vector.
+ * @returns `{ label, score }` with the winning chord label and its score.
+ */
 function matchChord(vec: Float32Array): { label: string; score: number } {
   const scores = templateScores(vec, null, null);
   let best = { label: "N", score: -Infinity };
@@ -769,6 +850,14 @@ function matchChord(vec: Float32Array): { label: string; score: number } {
 }
 
 /** Diatonic pitch classes for a key, used as a mild prior. */
+/**
+ * Returns the set of diatonic pitch classes for a given key.  Used as a mild
+ * prior during template scoring to favour chords that belong to the key.
+ *
+ * @param pc   - Tonic pitch class (0 = C, 1 = C#/Db, … 11 = B).
+ * @param mode - Key mode (`"major"` or `"minor"`).
+ * @returns `Set` of the seven diatonic pitch classes.
+ */
 function scaleOf(pc: number, mode: "major" | "minor"): Set<number> {
   const steps = mode === "major" ? [0, 2, 4, 5, 7, 9, 11] : [0, 2, 3, 5, 7, 8, 10];
   return new Set(steps.map((s) => (pc + s) % 12));
@@ -839,6 +928,14 @@ function templateScores(
 /* ------------------------------------------------------------------ */
 
 /** Distance around the circle of fifths (0..6). */
+/**
+ * Computes the shortest distance between two pitch classes on the circle of
+ * fifths.  Used to score how harmonically natural a chord transition is.
+ *
+ * @param a - First pitch class (0–11).
+ * @param b - Second pitch class (0–11).
+ * @returns Distance in steps around the circle of fifths, in the range 0–6.
+ */
 function fifthsDistance(a: number, b: number): number {
   const posA = (a * 7) % 12;
   const posB = (b * 7) % 12;
@@ -1138,6 +1235,15 @@ export async function analyzeAudioBuffer(
 }
 
 /** Remove chord blips: anything shorter than `minLen` merges into its stronger neighbour. */
+/**
+ * Post-processes a raw chord event sequence by merging events shorter than
+ * `minLen` into their longer neighbours (iteratively) until no short events
+ * remain.  Consecutive identical labels created by merges are also collapsed.
+ *
+ * @param events - Mutable array of chord events to clean up.
+ * @param minLen - Minimum allowed event duration in seconds.
+ * @returns Cleaned-up array of chord events.
+ */
 function absorbShort(events: ChordEvent[], minLen: number): ChordEvent[] {
   if (events.length < 2) return events;
   let out = events.map((e) => ({ ...e }));
@@ -1171,6 +1277,13 @@ function absorbShort(events: ChordEvent[], minLen: number): ChordEvent[] {
   return out;
 }
 
+/**
+ * Yields control back to the browser's event loop by resolving a zero-timeout
+ * promise.  Called between heavy synchronous processing stages so that the UI
+ * remains responsive during a long analysis run.
+ *
+ * @returns A promise that resolves on the next event-loop tick.
+ */
 function tick() {
   return new Promise((r) => setTimeout(r, 0));
 }
@@ -1186,6 +1299,14 @@ export class LiveChordDetector {
   private raf = 0;
   private history: string[] = [];
 
+  /**
+   * Opens a microphone stream, sets up a Web Audio analyser, and starts an
+   * animation-frame loop that extracts a chroma vector from the live FFT,
+   * matches it to the nearest chord template, and fires `onChord` with the
+   * majority-vote stabilised result every frame.
+   *
+   * @param onChord - Callback invoked each frame with `(label, chromaVector)`.
+   */
   async start(onChord: (label: string, chroma: Float32Array) => void) {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -1249,6 +1370,10 @@ export class LiveChordDetector {
     loop();
   }
 
+  /**
+   * Stops the microphone stream, cancels the animation frame, closes the Web
+   * Audio context, and resets all internal state.  Safe to call when not started.
+   */
   stop() {
     cancelAnimationFrame(this.raf);
     this.stream?.getTracks().forEach((t) => t.stop());
@@ -1261,6 +1386,16 @@ export class LiveChordDetector {
 }
 
 /** Simple autocorrelation pitch detector for the built-in tuner. */
+/**
+ * Detects the fundamental pitch of a short audio buffer using the
+ * autocorrelation method with parabolic interpolation for sub-sample accuracy.
+ * Returns `null` when the signal is too quiet or too short to reliably estimate
+ * a pitch.
+ *
+ * @param buf        - PCM signal buffer (mono, any sample rate).
+ * @param sampleRate - Sample rate in Hz.
+ * @returns Detected frequency in Hz, or `null` on failure.
+ */
 export function detectPitch(buf: Float32Array, sampleRate: number): number | null {
   const size = buf.length;
   let rms = 0;

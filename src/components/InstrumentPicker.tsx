@@ -16,6 +16,12 @@ interface Props {
   className?: string;
 }
 
+/**
+ * Dropdown selector component for picking an active instrument (Guitar, Ukulele, Piano, etc.).
+ *
+ * @param props - Component props containing current instrument ID, change handler, and optional label.
+ * @returns React JSX element rendering the instrument picker.
+ */
 export function InstrumentPicker({ value, onChange, label = "Instrument", className }: Props) {
   return (
     <div className={className}>

@@ -90,6 +90,13 @@ export const INSTRUMENTS: Instrument[] = [
   },
 ];
 
+/**
+ * Looks up an `Instrument` definition by ID.  Falls back to the first entry
+ * (standard guitar) when the ID is not found.
+ *
+ * @param id - Instrument identifier string (e.g. `"ukulele"`).
+ * @returns The matching `Instrument`, or the default guitar instrument.
+ */
 export function getInstrument(id: string): Instrument {
   return INSTRUMENTS.find((i) => i.id === id) ?? INSTRUMENTS[0]!;
 }
@@ -140,6 +147,13 @@ const QUALITY_INTERVALS: Record<string, number[]> = {
   "7b9": [0, 4, 7, 10, 1],
 };
 
+/**
+ * Normalises chord quality string aliases so they map to a canonical key in
+ * `QUALITY_INTERVALS` (e.g. `"min"` → `"m"`, `"Maj"` → `"maj"`).
+ *
+ * @param q - Raw quality suffix from a parsed chord label.
+ * @returns Normalised quality string.
+ */
 function normalizeQuality(q: string) {
   return q.replace(/^min(?!aj)/, "m").replace(/^M(?=aj)/, "maj");
 }
@@ -152,6 +166,13 @@ export interface ChordTones {
   intervals: number[];
 }
 
+/**
+ * Resolves a chord label to its constituent pitch classes, intervals, root,
+ * and bass note.
+ *
+ * @param label - Chord label string (e.g. `"Am7"`, `"G/B"`).
+ * @returns A `ChordTones` object, or `null` when the label cannot be parsed.
+ */
 export function chordTones(label: string): ChordTones | null {
   const p = parseChord(label);
   if (!p) return null;
@@ -170,6 +191,15 @@ export function chordTones(label: string): ChordTones | null {
 }
 
 /** Note names of a chord, ordered low to high for a keyboard diagram. */
+/**
+ * Returns the ordered note names (low to high) that should be highlighted on a
+ * piano keyboard diagram for the given chord label.
+ *
+ * @param label    - Chord label string.
+ * @param useFlats - When `true`, spell note names with flats.
+ * @returns An object with parallel `pcs` (pitch values, may span multiple octaves)
+ *          and `names` (note name strings) arrays, or `null` for invalid labels.
+ */
 export function pianoNotes(label: string, useFlats = false): { pcs: number[]; names: string[] } | null {
   const t = chordTones(label);
   if (!t) return null;
@@ -255,6 +285,14 @@ export function voicingsFor(label: string, instrument: Instrument, max = 3): num
   return out;
 }
 
+/**
+ * Returns a single best voicing for a chord label on the given instrument.
+ * Convenience wrapper around `voicingsFor` that returns only the top result.
+ *
+ * @param label      - Chord label string.
+ * @param instrument - Target instrument.
+ * @returns Fret array, or `null` if no voicing exists.
+ */
 export function voicingFor(label: string, instrument: Instrument): number[] | null {
   return voicingsFor(label, instrument, 1)[0] ?? null;
 }
@@ -313,6 +351,15 @@ function scoreVoicing(
 }
 
 /** Simplify a chord label down to plain major or minor. */
+/**
+ * Simplifies a chord label down to plain major or minor, discarding extensions
+ * and alterations.  Useful for voicing look-ups when an exact shape is not
+ * available.
+ *
+ * @param label - Full chord label (e.g. `"Am7b5"`).
+ * @returns Simplified label such as `"Am"` or `"C"`, or the original string
+ *          when the label cannot be parsed.
+ */
 export function simplifyChord(label: string): string {
   const p = parseChord(label);
   if (!p) return label;

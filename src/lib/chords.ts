@@ -52,11 +52,26 @@ const NOTE_INDEX: Record<string, number> = {
   Cb: 11,
 };
 
+/**
+ * Converts a note name (e.g. "C#", "Bb", "G") to a pitch-class integer (0–11).
+ * Returns `null` if the name is not recognised.
+ *
+ * @param note - Note name string to look up (case-insensitive root letter).
+ * @returns Pitch-class index 0–11, or `null` for unrecognised inputs.
+ */
 export function noteToPc(note: string): number | null {
   const n = note.charAt(0).toUpperCase() + note.slice(1);
   return n in NOTE_INDEX ? NOTE_INDEX[n]! : null;
 }
 
+/**
+ * Converts a pitch-class integer (0–11, or any integer via wrapping) back to a
+ * note name.  Uses sharps by default; pass `useFlats = true` for flat spellings.
+ *
+ * @param pc      - Pitch-class value (will be wrapped into 0–11).
+ * @param useFlats - When `true`, returns flat note names (Db, Eb, …) instead of sharps.
+ * @returns Note name string such as "C#", "Gb", "A", etc.
+ */
 export function pcToNote(pc: number, useFlats = false): string {
   const i = ((pc % 12) + 12) % 12;
   return useFlats ? FLAT_NOTES[i]! : SHARP_NOTES[i]!;
@@ -71,6 +86,14 @@ export interface ParsedChord {
   bass?: string;
 }
 
+/**
+ * Parses a chord token into its constituent parts: root note, quality suffix,
+ * and optional bass note (slash chords like "G/B").
+ *
+ * @param token - Chord string to parse (e.g. "Am7", "C#maj7/E").
+ * @returns A `ParsedChord` object with `root`, `quality`, and optional `bass`,
+ *          or `null` if the token does not look like a chord.
+ */
 export function parseChord(token: string): ParsedChord | null {
   const m = CHORD_RE.exec(token.trim());
   if (!m) return null;
@@ -79,6 +102,16 @@ export function parseChord(token: string): ParsedChord | null {
   return { root, quality: quality ?? "", ...(bass ? { bass } : {}) };
 }
 
+/**
+ * Transposes a chord token by the given number of semitones, preserving the
+ * quality suffix and optional bass note.  Returns the original string unchanged
+ * if the token cannot be parsed as a chord.
+ *
+ * @param token     - Chord string to transpose (e.g. "Am7").
+ * @param semitones - Number of semitones to transpose up (positive) or down (negative).
+ * @param useFlats  - When `true`, spell the transposed root/bass with flats.
+ * @returns Transposed chord string (e.g. "Bm7" for "Am7" + 2 semitones).
+ */
 export function transposeChord(token: string, semitones: number, useFlats = false): string {
   const parsed = parseChord(token);
   if (!parsed) return token;
@@ -92,6 +125,13 @@ export function transposeChord(token: string, semitones: number, useFlats = fals
   return out;
 }
 
+/**
+ * Returns `true` when the given token looks like a valid chord name according
+ * to `CHORD_RE` (e.g. "Cmaj7", "F#m", "Bb").
+ *
+ * @param token - Single whitespace-free token to test.
+ * @returns `true` if the token is a recognisable chord name, `false` otherwise.
+ */
 export function isChordToken(token: string): boolean {
   const t = token.trim();
   if (!t) return false;
@@ -99,6 +139,14 @@ export function isChordToken(token: string): boolean {
 }
 
 /** A text line counts as a chord line when most of its tokens are chords. */
+/**
+ * Heuristically decides whether a line of text is a chord line (as opposed to
+ * a lyric line).  A line qualifies when at least 60 % of its whitespace-separated
+ * tokens are recognisable chord names.
+ *
+ * @param line - A single line of text from a chord-sheet or lyric file.
+ * @returns `true` when the majority of tokens look like chords.
+ */
 export function looksLikeChordLine(line: string): boolean {
   const tokens = line.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return false;
@@ -112,6 +160,15 @@ export const KEY_NAMES = (useFlats = false) =>
 /** Nashville-style roman numerals for a chord within a key. */
 const MAJOR_DEGREES = ["I", "bII", "II", "bIII", "III", "IV", "bV", "V", "bVI", "VI", "bVII", "VII"];
 
+/**
+ * Returns the Nashville-style Roman numeral for a chord within a given key.
+ * Major chords use upper-case numerals (I, IV, V); minor chords use lower-case
+ * (i, iv, v).  Chromatic degrees are prefixed with "b" (e.g. "bVII").
+ *
+ * @param chord - Chord label to describe (e.g. "Am", "G7").
+ * @param keyPc - Pitch class of the tonic (0 = C, 1 = C#/Db, …).
+ * @returns Roman numeral string such as "IV", "vi", "bVII", or "" if unparseable.
+ */
 export function romanNumeral(chord: string, keyPc: number): string {
   const p = parseChord(chord);
   if (!p) return "";
@@ -168,6 +225,15 @@ export const GUITAR_SHAPES: Record<string, number[]> = {
   Bm7: [-1, 2, 4, 2, 3, 2],
 };
 
+/**
+ * Looks up a standard open-position guitar voicing for a chord label.
+ * Tries an exact match first, then resolves enharmonic equivalents and falls
+ * back to a simplified voicing (e.g. Am for Am7 when Am7 is unavailable).
+ *
+ * @param chord - Chord label to look up (e.g. "Dm7", "F#m").
+ * @returns Array of 6 fret numbers [low-E … high-E] where -1 = muted, 0 = open,
+ *          or `null` when no voicing is available in the built-in library.
+ */
 export function shapeFor(chord: string): number[] | null {
   if (GUITAR_SHAPES[chord]) return GUITAR_SHAPES[chord]!;
   const p = parseChord(chord);

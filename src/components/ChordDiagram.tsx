@@ -11,6 +11,14 @@ interface Props {
   showLabel?: boolean;
 }
 
+/**
+ * Renders an interactive chord diagram formatted for the selected instrument.
+ * Automatically chooses between a string fretboard SVG (guitar, ukulele, mandolin, etc.)
+ * or a piano keyboard SVG depending on instrument kind.
+ *
+ * @param props - Component configuration props including chord name, size, instrument, and voicing variant.
+ * @returns React JSX element rendering the chord diagram.
+ */
 export function ChordDiagram({
   chord,
   size = 76,
@@ -31,6 +39,13 @@ export function ChordDiagram({
   );
 }
 
+/**
+ * Draws a fretboard diagram SVG showing strings, frets, finger positions, muted strings ('x'),
+ * and open strings ('o') for stringed fretted instruments.
+ *
+ * @param props - Fretboard diagram properties.
+ * @returns SVG vector graphic representing the chord fingerings.
+ */
 function FretDiagram({
   chord,
   instrument,
@@ -175,6 +190,12 @@ function FretDiagram({
 const WHITE_PC = [0, 2, 4, 5, 7, 9, 11];
 const BLACK_AFTER = [0, 1, 3, 4, 5]; // white index within an octave that has a black key after it
 
+/**
+ * Draws a 2-octave piano keyboard SVG highlighting the active chord tones.
+ *
+ * @param props - Object containing chord name and SVG rendering width.
+ * @returns SVG vector graphic of piano keys with highlighted notes.
+ */
 function PianoDiagram({ chord, width }: { chord: string; width: number }) {
   const notes = pianoNotes(chord);
   const octaves = 2;

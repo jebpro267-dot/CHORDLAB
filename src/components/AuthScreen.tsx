@@ -6,6 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
+/**
+ * Authentication screen component offering user login and account registration forms.
+ * Manages form state, validation error display, and session initialization.
+ *
+ * @returns React JSX element rendering the authentication portal.
+ */
 export function AuthScreen() {
   const { signIn, register } = useAuth();
   const [mode, setMode] = useState<"signin" | "register">("signin");
@@ -14,6 +20,11 @@ export function AuthScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  /**
+   * Handles submission of login or registration credentials to the backend API.
+   *
+   * @param event - Form submission event.
+   */
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);

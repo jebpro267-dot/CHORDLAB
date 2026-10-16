@@ -14,6 +14,12 @@ export interface SyncedLyricsResult {
   artistName?: string;
 }
 
+/**
+ * Queries the backend lyrics service (lrclib) to retrieve synchronized LRC timestamps and plain lyrics text.
+ *
+ * @param args - Wrapper object containing song title, optional artist, and duration for ranking candidates.
+ * @returns Promise resolving to the SyncedLyricsResult containing synced lines and plain text.
+ */
 export function fetchSyncedLyrics({
   data,
 }: {

@@ -11,6 +11,12 @@ const items = [
   { to: "/tuner", label: "Tuner", Icon: Guitar, setting: "tuner" },
 ] as const;
 
+/**
+ * Persistent bottom navigation bar providing primary route links and sign-out controls.
+ * Filters visible tabs dynamically according to active navigation and feature settings.
+ *
+ * @returns React JSX element rendering the navigation bar.
+ */
 export function BottomNav() {
   const { settings } = useAppSettings();
   const { signOut } = useAuth();
@@ -53,6 +59,13 @@ export function BottomNav() {
   );
 }
 
+/**
+ * Checks whether a navigation section is enabled based on fine-grained backend feature flags.
+ *
+ * @param section - The navigation section identifier.
+ * @param features - Active feature flag dictionary from AppSettings.
+ * @returns boolean indicating if the tab should be shown.
+ */
 function isFeatureEnabled(
   section: (typeof items)[number]["setting"],
   features: ReturnType<typeof useAppSettings>["settings"]["features"],

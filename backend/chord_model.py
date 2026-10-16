@@ -28,6 +28,17 @@ PITCH_CLASSES = {
 
 
 def model_status() -> dict[str, str]:
+    """
+    Returns a status dictionary describing whether the TensorFlow chord model
+    is available and ready to use.
+
+    Checks for the presence of the model/labels files and the required Python
+    packages (TensorFlow, librosa) without loading anything into memory.
+
+    Returns:
+        dict with keys ``name``, ``status`` ("healthy" or "unavailable"),
+        and ``detail`` (human-readable explanation).
+    """
     if not MODEL_PATH.is_file() or not LABELS_PATH.is_file():
         return {
             "name": "TensorFlow chord model",
@@ -52,6 +63,18 @@ def model_status() -> dict[str, str]:
 
 @lru_cache(maxsize=1)
 def _load_model() -> tuple[Any, list[str]]:
+    """
+    Loads the Keras chord model and its label list from disk, caching the result
+    so subsequent calls return immediately.
+
+    Returns:
+        A ``(model, labels)`` tuple where ``model`` is a compiled Keras model
+        and ``labels`` is a list of chord-name strings indexed by class ID.
+
+    Raises:
+        RuntimeError: If TensorFlow is not installed, or if the model/labels
+            files are missing or corrupt.
+    """
     try:
         import tensorflow as tf
     except ImportError as error:
@@ -75,6 +98,21 @@ def _load_model() -> tuple[Any, list[str]]:
 
 
 def _audio_features(audio: bytes) -> tuple[Any, float]:
+    """
+    Decodes raw audio bytes and extracts a normalised chroma-STFT feature matrix.
+
+    Args:
+        audio: Raw audio file bytes (any format supported by librosa/ffmpeg).
+
+    Returns:
+        A ``(chroma, duration)`` tuple where ``chroma`` is a 2-D NumPy array
+        of shape ``(frames, 12)`` and ``duration`` is the track length in seconds.
+
+    Raises:
+        RuntimeError: If librosa or numpy are not installed.
+        ValueError:   If the audio cannot be decoded, contains no samples, or
+                      exceeds ``MAX_DURATION_SECONDS``.
+    """
     try:
         import librosa
         import numpy as np
@@ -104,6 +142,18 @@ def _audio_features(audio: bytes) -> tuple[Any, float]:
 
 
 def _make_windows(chroma: Any) -> tuple[Any, Any]:
+    """
+    Slices the chroma feature matrix into overlapping fixed-size windows for
+    batch inference.
+
+    Args:
+        chroma: 2-D NumPy array of shape ``(frames, 12)``.
+
+    Returns:
+        A ``(windows, centers)`` tuple where ``windows`` has shape
+        ``(n_windows, WINDOW_FRAMES, 12, 1)`` (ready for the Conv2D model) and
+        ``centers`` is an int32 array of the start-frame index for each window.
+    """
     import numpy as np
 
     half = WINDOW_FRAMES // 2
@@ -115,6 +165,21 @@ def _make_windows(chroma: Any) -> tuple[Any, Any]:
 
 
 def analyze_audio(audio: bytes) -> dict[str, Any]:
+    """
+    Runs the full TensorFlow chord-recognition pipeline on raw audio bytes.
+
+    Pipeline: decode audio → extract chroma → build windows → model inference
+    → merge consecutive identical predictions into time-stamped chord events.
+
+    Args:
+        audio: Raw audio file bytes.
+
+    Returns:
+        A dict with keys:
+        - ``"duration"`` (float): track length in seconds.
+        - ``"chords"`` (list[dict]): list of chord events, each with
+          ``"start"``, ``"end"``, ``"label"``, and ``"confidence"`` fields.
+    """
     import numpy as np
 
     model, labels = _load_model()
@@ -129,6 +194,16 @@ def analyze_audio(audio: bytes) -> dict[str, Any]:
     scores = [float(probabilities[0, current])]
 
     def append_event(label_id: int, first: int, last: int, confidence: list[float]) -> None:
+        """
+        Appends a single chord event to ``events`` if the time window is
+        non-empty (i.e. ``end_seconds > start_seconds``).
+
+        Args:
+            label_id:   Class index into ``labels``.
+            first:      Index of the first window in this run.
+            last:       Index of the last window in this run (inclusive).
+            confidence: Per-window softmax confidence values for this class.
+        """
         start_seconds = max(0.0, first * STRIDE_FRAMES * frame_seconds)
         end_seconds = min(duration, (last * STRIDE_FRAMES + STRIDE_FRAMES) * frame_seconds)
         if end_seconds > start_seconds:
@@ -152,10 +227,36 @@ def analyze_audio(audio: bytes) -> dict[str, Any]:
 
 
 def _label_id(root: int, quality: str) -> int:
+    """
+    Converts a (root pitch-class, quality string) pair to the integer class ID
+    used by the model.  Class 0 is reserved for "no chord" (N).
+
+    Args:
+        root:    Root pitch class (0 = C, 1 = C#, … 11 = B).
+        quality: Quality string (one of ``QUALITIES``).
+
+    Returns:
+        Integer class ID in the range ``[1, 12 * len(QUALITIES)]``.
+    """
     return 1 + root * len(QUALITIES) + QUALITIES.index(quality)
 
 
 def chord_label_id(raw: str) -> int | None:
+    """
+    Maps a Harte-notation chord label (e.g. ``"A:min7"``, ``"N"``) to the
+    integer class ID expected by the model, or returns ``None`` for unrecognised
+    labels.
+
+    Harte notation uses a ``root:quality`` format separated by a colon.  Slash
+    chords (``"A:min/b3"``) are supported; the inversion is ignored.
+
+    Args:
+        raw: Raw chord label string from an annotation file.
+
+    Returns:
+        Integer class ID, ``0`` for "no chord" tokens (N, X, NC), or ``None``
+        if the label cannot be parsed.
+    """
     token = raw.strip().split("/", 1)[0]
     if token.upper() in {"N", "X", "NC"}:
         return 0
@@ -188,6 +289,15 @@ def chord_label_id(raw: str) -> int | None:
 
 
 def chord_name(label_id: int) -> str:
+    """
+    Converts an integer class ID back to a human-readable chord name string.
+
+    Args:
+        label_id: Integer class ID (0 = "N", 1–108 = standard chord labels).
+
+    Returns:
+        Chord name string such as ``"Am7"`` or ``"N"`` for no-chord.
+    """
     if label_id == 0:
         return "N"
     value = label_id - 1
