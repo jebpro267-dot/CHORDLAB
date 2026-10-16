@@ -101,12 +101,20 @@ Start the admin frontend in a third terminal:
 npm run dev:admin
 ```
 
+On Windows, `start.bat` launches all three services in separate terminal windows
+with a single double-click.
+
 The user app runs at `http://localhost:5173/`; the standalone admin console is
 at `http://localhost:5174/`. FastAPI's interactive API documentation is at
 `http://localhost:8000/docs`. Both Vite servers proxy `/api` requests to FastAPI
 on port 8000. Set `VITE_BACKEND_URL` when deploying the frontends and API to
 separate origins. Both the Python backend and TypeScript frontend modules
 include comprehensive docstrings, type annotations, and OpenAPI schemas.
+
+The sign-in screen accepts an email address or username. The last-used
+credentials are saved in `localStorage` and pre-filled on the next visit so
+you do not have to retype them in development. The admin console similarly
+remembers the last-used admin username and password across page loads.
 
 When preparing a requested "commit everything", review and update this README
 to match the current project features and setup before committing.

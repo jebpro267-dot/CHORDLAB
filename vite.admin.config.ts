@@ -17,6 +17,7 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  cacheDir: "node_modules/.vite-admin",
   server: {
     host: "0.0.0.0",
     port: 5174,

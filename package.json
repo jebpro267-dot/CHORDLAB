@@ -4,6 +4,8 @@
   "sideEffects": false,
   "type": "module",
   "scripts": {
+    "start": "start.bat",
+    "start:all": "start.bat",
     "dev": "vite dev",
     "dev:admin": "vite --config vite.admin.config.ts",
     "build": "vite build",

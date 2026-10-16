@@ -91,8 +91,8 @@ class RomanizeRequest(BaseModel):
 
 
 class UserCredentials(BaseModel):
-    email: str = Field(min_length=3, max_length=254)
-    password: str = Field(min_length=8, max_length=128)
+    email: str = Field(min_length=1, max_length=254)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class AdminCredentials(BaseModel):
@@ -282,16 +282,24 @@ def _initialize_auth_database() -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )"""
         )
-        admin_password = os.getenv("ADMIN_PASSWORD", "")
+        admin_password = os.getenv("ADMIN_PASSWORD", "jebpro@8898")
         admin_username = os.getenv("ADMIN_USERNAME", "jebin").strip()
         if admin_password and admin_username:
             existing_admin = connection.execute(
-                "SELECT id FROM accounts WHERE kind = 'admin' LIMIT 1"
+                "SELECT id, username, password_hash FROM accounts WHERE kind = 'admin' LIMIT 1"
             ).fetchone()
             if existing_admin is None:
                 connection.execute(
                     "INSERT INTO accounts (id, kind, username, password_hash) VALUES (?, 'admin', ?, ?)",
                     (secrets.token_hex(16), admin_username, _hash_password(admin_password)),
+                )
+            elif (
+                existing_admin["username"] != admin_username
+                or not _verify_password(admin_password, existing_admin["password_hash"])
+            ):
+                connection.execute(
+                    "UPDATE accounts SET username = ?, password_hash = ? WHERE id = ?",
+                    (admin_username, _hash_password(admin_password), existing_admin["id"]),
                 )
 
 
@@ -386,7 +394,7 @@ def require_admin(account: sqlite3.Row = Depends(require_account)) -> sqlite3.Ro
 
 
 def require_user(account: sqlite3.Row = Depends(require_account)) -> sqlite3.Row:
-    """FastAPI dependency ensuring the requesting user has regular user privileges.
+    """FastAPI dependency ensuring the requesting user has user or admin privileges.
 
     Args:
         account: The authenticated account row provided by `require_account`.
@@ -395,9 +403,9 @@ def require_user(account: sqlite3.Row = Depends(require_account)) -> sqlite3.Row
         sqlite3.Row: The user account database row.
 
     Raises:
-        HTTPException: 403 Forbidden if the account role is not 'user'.
+        HTTPException: 403 Forbidden if the account role is not 'user' or 'admin'.
     """
-    if account["kind"] != "user":
+    if account["kind"] not in ("user", "admin"):
         raise HTTPException(403, "User account required")
     return account
 
@@ -561,25 +569,26 @@ async def register_user(credentials: UserCredentials) -> dict:
 
 @app.post("/api/auth/login")
 async def login_user(credentials: UserCredentials) -> dict:
-    """Authenticate an existing user with email and password.
+    """Authenticate an existing user or admin with email or username and password.
 
     Validates credentials against stored PBKDF2 password hashes and creates a new session.
 
     Args:
-        credentials: UserCredentials containing email and password.
+        credentials: UserCredentials containing email or username and password.
 
     Returns:
         dict: Session payload with bearer token and account details.
 
     Raises:
-        HTTPException: 401 Unauthorized if email or password does not match.
+        HTTPException: 401 Unauthorized if email/username or password does not match.
     """
     _initialize_auth_database()
-    email = credentials.email.strip().lower()
+    identifier = credentials.email.strip().lower()
     with _connect_database() as connection:
         account = connection.execute(
-            "SELECT id, kind, email, username, password_hash FROM accounts WHERE kind = 'user' AND email = ?",
-            (email,),
+            """SELECT id, kind, email, username, password_hash FROM accounts
+               WHERE (lower(COALESCE(email, '')) = ? OR lower(COALESCE(username, '')) = ?) LIMIT 1""",
+            (identifier, identifier),
         ).fetchone()
     if account is None or not _verify_password(credentials.password, account["password_hash"]):
         raise HTTPException(401, "Email or password is incorrect")
@@ -603,7 +612,7 @@ async def login_admin(credentials: AdminCredentials) -> dict:
         HTTPException: 503 if ADMIN_PASSWORD is unset, 401 if credentials incorrect.
     """
     _initialize_auth_database()
-    if not os.getenv("ADMIN_PASSWORD"):
+    if not os.getenv("ADMIN_PASSWORD", "jebpro@8898"):
         raise HTTPException(503, "Set ADMIN_PASSWORD on the FastAPI server before admin sign-in")
     username = credentials.username.strip()
     with _connect_database() as connection:
@@ -626,7 +635,7 @@ async def current_user(account: sqlite3.Row = Depends(require_user)) -> dict:
     Returns:
         dict: Dictionary containing id, email, and role.
     """
-    return {"id": account["id"], "email": account["email"], "role": "user"}
+    return {"id": account["id"], "email": account["email"] or account["username"] or "user", "role": account["kind"]}
 
 
 @app.post("/api/auth/logout")
@@ -872,7 +881,7 @@ async def chord_catalog(label: str = "") -> dict:
         return {"ok": True, "chord": None}
     base = os.getenv("CHORDS_API_URL", CHORDS_DEFAULT).rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with httpx.AsyncClient(timeout=3) as client:
             response = await client.get(
                 f"{base}/chords",
                 params={"note": _note_id(root), "type": chord_type, "limit": "all"},

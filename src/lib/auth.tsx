@@ -8,7 +8,7 @@ const ACCOUNT_KEY = "chordlab-user-account";
 export interface UserAccount {
   id: string;
   email: string;
-  role: "user";
+  role: "user" | "admin";
 }
 
 interface AuthContextValue {

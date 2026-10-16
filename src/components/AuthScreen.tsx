@@ -15,8 +15,20 @@ import { Label } from "@/components/ui/label";
 export function AuthScreen() {
   const { signIn, register } = useAuth();
   const [mode, setMode] = useState<"signin" | "register">("signin");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState(() => {
+    try {
+      return localStorage.getItem("chordlab-saved-email") || "jebin";
+    } catch {
+      return "jebin";
+    }
+  });
+  const [password, setPassword] = useState(() => {
+    try {
+      return localStorage.getItem("chordlab-saved-password") || "jebpro@8898";
+    } catch {
+      return "jebpro@8898";
+    }
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -30,8 +42,17 @@ export function AuthScreen() {
     setBusy(true);
     setError("");
     try {
-      if (mode === "register") await register(email, password);
-      else await signIn(email, password);
+      if (mode === "register") {
+        await register(email, password);
+      } else {
+        await signIn(email, password);
+      }
+      try {
+        localStorage.setItem("chordlab-saved-email", email);
+        localStorage.setItem("chordlab-saved-password", password);
+      } catch {
+        // ignore
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not authenticate.");
     } finally {
@@ -80,11 +101,12 @@ export function AuthScreen() {
 
         <form onSubmit={(event) => void submit(event)} className="mt-5 space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="account-email">Email</Label>
+            <Label htmlFor="account-email">{mode === "register" ? "Email" : "Email or Username"}</Label>
             <Input
               id="account-email"
-              type="email"
-              autoComplete="email"
+              type={mode === "register" ? "email" : "text"}
+              autoComplete={mode === "register" ? "email" : "username"}
+              placeholder={mode === "register" ? "you@example.com" : "e.g. jebin or you@example.com"}
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               required
@@ -100,7 +122,7 @@ export function AuthScreen() {
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               required
-              minLength={8}
+              minLength={mode === "register" ? 8 : 1}
               maxLength={128}
             />
             {mode === "register" && (

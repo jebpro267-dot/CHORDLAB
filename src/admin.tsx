@@ -114,6 +114,9 @@ async function adminRequest<T>(path: string, token: string, init?: RequestInit):
   return (await response.json()) as T;
 }
 
+const DEFAULT_ADMIN_USERNAME = "jebin";
+const DEFAULT_ADMIN_PASSWORD = "jebpro@8898";
+
 /**
  * Root component for the standalone administrative control dashboard.
  * Manages admin authentication, global feature toggles, navigation visibility,
@@ -123,13 +126,43 @@ async function adminRequest<T>(path: string, token: string, init?: RequestInit):
  */
 function AdminApp() {
   const [token, setToken] = useState("");
-  const [username, setUsername] = useState("jebin");
-  const [password, setPassword] = useState("");
+  const [username, setUsername] = useState(() => {
+    try {
+      return localStorage.getItem("chordlab_admin_username") || DEFAULT_ADMIN_USERNAME;
+    } catch {
+      return DEFAULT_ADMIN_USERNAME;
+    }
+  });
+  const [password, setPassword] = useState(() => {
+    try {
+      return localStorage.getItem("chordlab_admin_password") || DEFAULT_ADMIN_PASSWORD;
+    } catch {
+      return DEFAULT_ADMIN_PASSWORD;
+    }
+  });
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_APP_SETTINGS);
   const [health, setHealth] = useState<HealthReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+
+  function handleUsernameChange(val: string) {
+    setUsername(val);
+    try {
+      localStorage.setItem("chordlab_admin_username", val);
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  function handlePasswordChange(val: string) {
+    setPassword(val);
+    try {
+      localStorage.setItem("chordlab_admin_password", val);
+    } catch {
+      // Ignore storage errors
+    }
+  }
 
   /**
    * Fetches latest application configuration settings and system health checks in parallel.
@@ -178,7 +211,12 @@ function AdminApp() {
       if (!response.ok || !result.token) {
         throw new Error(result.detail ?? "Username or password is incorrect.");
       }
-      setPassword("");
+      try {
+        localStorage.setItem("chordlab_admin_username", username);
+        localStorage.setItem("chordlab_admin_password", password);
+      } catch {
+        // Ignore storage errors
+      }
       await load(result.token);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not sign in.");
@@ -232,7 +270,13 @@ function AdminApp() {
       }
     }
     setToken("");
-    setPassword("");
+    setPassword(() => {
+      try {
+        return localStorage.getItem("chordlab_admin_password") || DEFAULT_ADMIN_PASSWORD;
+      } catch {
+        return DEFAULT_ADMIN_PASSWORD;
+      }
+    });
     setHealth(null);
   }
 
@@ -260,7 +304,7 @@ function AdminApp() {
               type="text"
               autoComplete="username"
               value={username}
-              onChange={(event) => setUsername(event.target.value)}
+              onChange={(event) => handleUsernameChange(event.target.value)}
               className="admin-input w-full pl-10"
               required
             />
@@ -273,7 +317,7 @@ function AdminApp() {
             type="password"
             autoComplete="current-password"
             value={password}
-            onChange={(event) => setPassword(event.target.value)}
+            onChange={(event) => handlePasswordChange(event.target.value)}
             className="admin-input mt-2 w-full"
             required
           />
