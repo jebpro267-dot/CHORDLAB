@@ -934,19 +934,48 @@ def _separate_audio(audio: bytes, filename: str) -> bytes:
     """
     with tempfile.TemporaryDirectory(prefix="chordlab-demucs-") as work_dir:
         work = Path(work_dir)
-        safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", Path(filename or "audio.mp3").name)
-        source = work / safe_name
-        source.write_bytes(audio)
+        wav_source = work / "input.wav"
+        source = wav_source
+        try:
+            import io
+            import soundfile as sf
+            import numpy as np
+            data, sr = sf.read(io.BytesIO(audio), dtype="float32", always_2d=True)
+            if data.shape[1] == 1:
+                data = np.tile(data, (1, 2))
+            sf.write(str(wav_source), data, sr, format="WAV", subtype="PCM_16")
+        except Exception:
+            ext = Path(filename or "").suffix.lower()
+            if not ext or ext not in (".wav", ".mp3", ".flac", ".ogg", ".m4a"):
+                ext = ".wav"
+            source = work / f"input{ext}"
+            source.write_bytes(audio)
+
         output = work / "output"
         model = os.getenv("DEMUCS_MODEL", "htdemucs")
         script = ROOT / "scripts" / "demucs_cpu.py"
+        demucs_python = os.getenv("DEMUCS_PYTHON") or sys.executable or "python"
+
+        env = os.environ.copy()
+        try:
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            ffmpeg_dir = os.path.dirname(ffmpeg_exe)
+            target_ffmpeg = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+            if not os.path.exists(target_ffmpeg):
+                shutil.copyfile(ffmpeg_exe, target_ffmpeg)
+            env["PATH"] = ffmpeg_dir + os.pathsep + env.get("PATH", "")
+        except Exception:
+            pass
+
         try:
             subprocess.run(
-                [os.getenv("DEMUCS_PYTHON", "python3"), str(script), "-n", model, "--float32", "-o", str(output), str(source)],
+                [demucs_python, str(script), "-n", model, "--float32", "-o", str(output), str(source)],
                 check=True,
                 timeout=600,
                 capture_output=True,
                 text=True,
+                env=env,
             )
         except subprocess.CalledProcessError as error:
             detail = error.stderr or error.stdout or str(error)

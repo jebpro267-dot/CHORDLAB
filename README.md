@@ -101,6 +101,7 @@ ChordLab includes both studio-grade deep stem separation (via Demucs) and a ligh
 - Interactive multi-track playback, per-instrument volume mixing, stem soloing (`S` button), bulk mute/unmute, and zero-click Web Audio gain scheduling in `src/components/StudioPanel.tsx` and `src/lib/studio.ts`.
 - Acoustic dynamic preservation using zero-phase Butterworth filtering (`sosfiltfilt`) to maintain natural instrument dynamics without background noise amplification.
 - Automatic cross-playback synchronization preventing simultaneous playback between the studio mixer and main song audio player.
+- Robust Demucs audio loading pipeline in `scripts/demucs_cpu.py` and `backend/main.py` that normalizes inputs to clean stereo WAVs via SoundFile, preventing `sphn` channel/extension errors and automatically embedding `imageio-ffmpeg` to eliminate missing system FFmpeg failures.
 
 ### Musical Welcome Experience
 

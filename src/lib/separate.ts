@@ -15,7 +15,19 @@ export async function startSeparation(
   file: File | Blob,
 ): Promise<{ name: StemName; blob: Blob }[]> {
   const form = new FormData();
-  form.append("file", file, "audio");
+  let filename = "audio.wav";
+  if (file instanceof File && file.name) {
+    filename = file.name;
+  } else if (file.type) {
+    if (file.type.includes("wav")) filename = "audio.wav";
+    else if (file.type.includes("mp3") || file.type.includes("mpeg")) filename = "audio.mp3";
+    else if (file.type.includes("ogg")) filename = "audio.ogg";
+    else if (file.type.includes("flac")) filename = "audio.flac";
+    else if (file.type.includes("webm")) filename = "audio.webm";
+    else if (file.type.includes("m4a") || file.type.includes("mp4") || file.type.includes("aac"))
+      filename = "audio.m4a";
+  }
+  form.append("file", file, filename);
   const res = await backendFetch("/api/separate", { method: "POST", body: form });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { detail?: string; error?: string };
