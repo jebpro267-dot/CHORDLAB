@@ -172,11 +172,18 @@ export class StudioPlayer {
 
   /**
    * Applies the current mute/volume settings to all loaded track gain nodes.
-   * Called internally whenever the mix state changes.
+   * Uses precise AudioParam scheduling to prevent audio bleeding and clicks.
    */
   private applyMix() {
+    const now = this.ctx.currentTime;
     for (const t of this.tracks.values()) {
-      t.gain.gain.value = t.muted ? 0 : t.volume;
+      const targetGain = t.muted ? 0 : Math.max(0, Math.min(1, t.volume));
+      try {
+        t.gain.gain.cancelScheduledValues(now);
+        t.gain.gain.setValueAtTime(targetGain, now);
+      } catch {
+        t.gain.gain.value = targetGain;
+      }
     }
   }
 

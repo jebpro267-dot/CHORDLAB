@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Outlet,
@@ -12,6 +13,7 @@ import { Toaster } from "../components/ui/sonner";
 import { useAppSettings, AppSettingsProvider } from "../lib/app-settings";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { AuthScreen } from "../components/AuthScreen";
+import { WelcomeScreen } from "../components/WelcomeScreen";
 
 function NotFoundComponent() {
   return (
@@ -126,6 +128,25 @@ function AppFrame() {
   const { settings, ready } = useAppSettings();
   const auth = useAuth();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const [showWelcome, setShowWelcome] = useState(() => {
+    try {
+      return !sessionStorage.getItem("chordlab-welcome-shown");
+    } catch {
+      return true;
+    }
+  });
+  const [welcomeMessage, setWelcomeMessage] = useState("Welcome to ChordLab Studio");
+
+  useEffect(() => {
+    const handleTriggerWelcome = (e: Event) => {
+      const custom = e as CustomEvent<{ message?: string }>;
+      setWelcomeMessage(custom.detail?.message || "Welcome to ChordLab");
+      setShowWelcome(true);
+    };
+    window.addEventListener("chordlab:show-welcome", handleTriggerWelcome);
+    return () => window.removeEventListener("chordlab:show-welcome", handleTriggerWelcome);
+  }, []);
+
   const flags = settings.features;
   const unavailable =
     (pathname === "/analyze" &&
@@ -138,6 +159,20 @@ function AppFrame() {
 
   return (
     <>
+      {showWelcome && (
+        <WelcomeScreen
+          message={welcomeMessage}
+          onComplete={() => {
+            try {
+              sessionStorage.setItem("chordlab-welcome-shown", "true");
+            } catch {
+              // ignore
+            }
+            setShowWelcome(false);
+          }}
+        />
+      )}
+
       {auth.ready && auth.account ? (
         <>
           <div className="min-h-screen pb-24">

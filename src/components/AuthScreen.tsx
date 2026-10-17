@@ -53,6 +53,16 @@ export function AuthScreen() {
       } catch {
         // ignore
       }
+      window.dispatchEvent(
+        new CustomEvent("chordlab:show-welcome", {
+          detail: {
+            message:
+              mode === "register"
+                ? "Welcome to ChordLab Studio!"
+                : `Welcome back, ${email.split("@")[0]}!`,
+          },
+        }),
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not authenticate.");
     } finally {

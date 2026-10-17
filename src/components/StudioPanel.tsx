@@ -83,6 +83,14 @@ export function StudioPanel({ song }: { song: Song }) {
       setPlaying(player.playing);
     };
 
+    const handlePauseStudio = () => {
+      if (player.playing) {
+        player.pause();
+        setPlaying(false);
+      }
+    };
+    window.addEventListener("chordlab:pause-studio", handlePauseStudio);
+
     void (async () => {
       const loaded: TrackName[] = [];
       const full = await getAudio(song.id);
@@ -90,16 +98,45 @@ export function StudioPanel({ song }: { song: Song }) {
         await player.load("full", full);
         loaded.push("full");
       }
+
+      // Discover stored stems
+      const availableStems = new Map<StemName, Blob>();
       for (const stem of STEMS) {
         const blob = await getAudio(`${song.id}::${stem}`);
         if (blob) {
-          await player.load(stem, blob);
-          loaded.push(stem);
+          availableStems.set(stem, blob);
         }
       }
+
+      // Check if detailed instrument sub-stems are present
+      const subStemNames: StemName[] = [
+        "piano",
+        "acoustic_guitar",
+        "electric_guitar",
+        "flute",
+        "violin",
+        "ukulele",
+      ];
+      const hasSubStems = subStemNames.some((s) => availableStems.has(s));
+
+      for (const [stem, blob] of availableStems.entries()) {
+        // Prevent duplicate overlapping playback: if detailed sub-stems are present,
+        // do not load the container "other" or redundant "bass" into simultaneous playback
+        if (hasSubStems && (stem === "other" || stem === "bass")) {
+          continue;
+        }
+        if (!hasSubStems && stem === "bass_guitar" && availableStems.has("bass")) {
+          continue;
+        }
+        await player.load(stem, blob);
+        loaded.push(stem);
+      }
+
       if (cancelled) return;
-      // With stems available the original is muted so the mix is the stems.
-      if (loaded.length > 1) player.setMuted("full", true);
+      // With stems available the original full track is strictly muted so the mix is the isolated stems.
+      if (loaded.length > 1) {
+        player.setMuted("full", true);
+      }
       setTracks(loaded);
       setMix(
         Object.fromEntries(
@@ -111,6 +148,7 @@ export function StudioPanel({ song }: { song: Song }) {
 
     return () => {
       cancelled = true;
+      window.removeEventListener("chordlab:pause-studio", handlePauseStudio);
       player.destroy();
       playerRef.current = null;
     };
@@ -124,6 +162,8 @@ export function StudioPanel({ song }: { song: Song }) {
       p.pause();
       setPlaying(false);
     } else {
+      // Pause any running top-level single audio player
+      window.dispatchEvent(new CustomEvent("chordlab:pause-main-audio"));
       void p.play();
       setPlaying(true);
     }
@@ -156,11 +196,33 @@ export function StudioPanel({ song }: { song: Song }) {
       const separated = await startSeparation(blob);
       const player = playerRef.current;
       const loaded: TrackName[] = ["full"];
+
       for (const { name, blob: stemBlob } of separated) {
         await putAudio(`${song.id}::${name}`, stemBlob);
+      }
+
+      const separatedMap = new Map(separated.map((s) => [s.name, s.blob]));
+      const subStemNames: StemName[] = [
+        "piano",
+        "acoustic_guitar",
+        "electric_guitar",
+        "flute",
+        "violin",
+        "ukulele",
+      ];
+      const hasSubStems = subStemNames.some((s) => separatedMap.has(s));
+
+      for (const [name, stemBlob] of separatedMap.entries()) {
+        if (hasSubStems && (name === "other" || name === "bass")) {
+          continue;
+        }
+        if (!hasSubStems && name === "bass_guitar" && separatedMap.has("bass")) {
+          continue;
+        }
         await player?.load(name, stemBlob);
         loaded.push(name);
       }
+
       player?.setMuted("full", true);
       setTracks(loaded);
       setMix(Object.fromEntries(loaded.map((n) => [n, { volume: 1, muted: n === "full" }])));
@@ -357,15 +419,68 @@ export function StudioPanel({ song }: { song: Song }) {
               )}
             </div>
             {separating && <p className="mt-1 text-xs text-muted-foreground">{sepStage}</p>}
-            <div className="mt-3 space-y-2">
+            <div className="mt-3 flex items-center justify-between text-xs text-muted-foreground">
+              <span>{tracks.length} active stem{tracks.length !== 1 ? "s" : ""}</span>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  className="rounded px-2 py-0.5 hover:bg-surface-2 hover:text-foreground"
+                  onClick={() => {
+                    const p = playerRef.current;
+                    for (const name of tracks) {
+                      p?.setMuted(name, false);
+                    }
+                    setMix((m) =>
+                      Object.fromEntries(
+                        tracks.map((name) => [name, { volume: m[name]?.volume ?? 1, muted: false }]),
+                      ),
+                    );
+                  }}
+                >
+                  Unmute all
+                </button>
+                <button
+                  type="button"
+                  className="rounded px-2 py-0.5 hover:bg-surface-2 hover:text-foreground"
+                  onClick={() => {
+                    const p = playerRef.current;
+                    for (const name of tracks) {
+                      p?.setMuted(name, true);
+                    }
+                    setMix((m) =>
+                      Object.fromEntries(
+                        tracks.map((name) => [name, { volume: m[name]?.volume ?? 1, muted: true }]),
+                      ),
+                    );
+                  }}
+                >
+                  Mute all
+                </button>
+              </div>
+            </div>
+            <div className="mt-3 space-y-2.5">
               {tracks.map((name) => {
                 const state = mix[name] ?? { volume: 1, muted: false };
+                const isSolo =
+                  !state.muted &&
+                  tracks.filter((t) => t !== name).every((t) => mix[t]?.muted === true);
+
                 return (
-                  <div key={name} className="flex items-center gap-3">
+                  <div
+                    key={name}
+                    className={`flex items-center gap-3 rounded-lg border border-border/40 bg-surface-1 px-3 py-2 transition-all ${
+                      state.muted ? "opacity-50" : "opacity-100"
+                    }`}
+                  >
                     <button
                       type="button"
-                      className="text-muted-foreground"
+                      className={`flex size-7 items-center justify-center rounded-md border text-xs font-semibold transition-colors ${
+                        state.muted
+                          ? "border-destructive/40 bg-destructive/10 text-destructive"
+                          : "border-border text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+                      }`}
                       aria-label={`${state.muted ? "Unmute" : "Mute"} ${STEM_LABELS[name]}`}
+                      title={state.muted ? "Unmute track" : "Mute track"}
                       onClick={() => {
                         const muted = !state.muted;
                         playerRef.current?.setMuted(name, muted);
@@ -373,24 +488,68 @@ export function StudioPanel({ song }: { song: Song }) {
                       }}
                     >
                       {state.muted ? (
-                        <VolumeX className="size-4" />
+                        <VolumeX className="size-3.5" />
                       ) : (
-                        <Volume2 className="size-4" />
+                        <Volume2 className="size-3.5" />
                       )}
                     </button>
-                    <span className="w-16 text-xs">{STEM_LABELS[name]}</span>
+
+                    <button
+                      type="button"
+                      className={`flex size-7 items-center justify-center rounded-md border text-xs font-bold transition-colors ${
+                        isSolo
+                          ? "border-amber-500 bg-amber-500/20 text-amber-400"
+                          : "border-border text-muted-foreground hover:bg-surface-2 hover:text-foreground"
+                      }`}
+                      aria-label={`Solo ${STEM_LABELS[name]}`}
+                      title="Solo this instrument"
+                      onClick={() => {
+                        const p = playerRef.current;
+                        if (isSolo) {
+                          // Unsolo: unmute all
+                          for (const t of tracks) p?.setMuted(t, false);
+                          setMix((m) =>
+                            Object.fromEntries(
+                              tracks.map((t) => [t, { volume: m[t]?.volume ?? 1, muted: false }]),
+                            ),
+                          );
+                        } else {
+                          // Solo this track: mute all others
+                          for (const t of tracks) p?.setMuted(t, t !== name);
+                          setMix((m) =>
+                            Object.fromEntries(
+                              tracks.map((t) => [t, { volume: m[t]?.volume ?? 1, muted: t !== name }]),
+                            ),
+                          );
+                        }
+                      }}
+                    >
+                      S
+                    </button>
+
+                    <span className="w-24 truncate text-xs font-medium">{STEM_LABELS[name]}</span>
+
                     <Slider
                       className="flex-1"
                       min={0}
                       max={100}
                       step={5}
-                      value={[Math.round(state.volume * 100)]}
+                      value={[state.muted ? 0 : Math.round(state.volume * 100)]}
                       onValueChange={([v]) => {
                         const volume = (v ?? 100) / 100;
                         playerRef.current?.setVolume(name, volume);
-                        setMix((m) => ({ ...m, [name]: { ...state, volume } }));
+                        if (state.muted && volume > 0) {
+                          playerRef.current?.setMuted(name, false);
+                          setMix((m) => ({ ...m, [name]: { volume, muted: false } }));
+                        } else {
+                          setMix((m) => ({ ...m, [name]: { ...state, volume } }));
+                        }
                       }}
                     />
+
+                    <span className="w-8 text-right font-mono text-[11px] text-muted-foreground">
+                      {state.muted ? "0%" : `${Math.round(state.volume * 100)}%`}
+                    </span>
                   </div>
                 );
               })}

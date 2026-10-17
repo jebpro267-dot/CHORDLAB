@@ -984,9 +984,9 @@ def _separate_audio(audio: bytes, filename: str) -> bytes:
                 }
                 for inst_name, (low, high) in instruments_filters.items():
                     sos = signal.butter(4, [low / nyq, min(0.99, high / nyq)], btype="bandpass", output="sos")
-                    filtered = signal.sosfilt(sos, data, axis=0) if data.ndim > 1 else signal.sosfilt(sos, data)
-                    peak = float(np.max(np.abs(filtered)) + 1e-9)
-                    filtered = (filtered / peak) * 0.88
+                    filtered = signal.sosfiltfilt(sos, data, axis=0) if data.ndim > 1 else signal.sosfiltfilt(sos, data)
+                    # Natural acoustic dynamics: keep original relative level without overboosting background noise
+                    filtered = np.clip(filtered, -1.0, 1.0)
                     sf.write(str(target_dir / f"{inst_name}.wav"), filtered, sr)
             except Exception:
                 for inst_name in ("piano", "acoustic_guitar", "electric_guitar", "flute", "violin", "ukulele"):

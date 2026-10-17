@@ -90,6 +90,18 @@ function SongPage() {
     return () => window.clearInterval(iv);
   }, [scrollSpeed]);
 
+  useEffect(() => {
+    const handlePause = () => {
+      const a = audioRef.current;
+      if (a && !a.paused) {
+        a.pause();
+        setPlaying(false);
+      }
+    };
+    window.addEventListener("chordlab:pause-main-audio", handlePause);
+    return () => window.removeEventListener("chordlab:pause-main-audio", handlePause);
+  }, []);
+
   const sheet = useMemo(
     () =>
       song
@@ -227,6 +239,7 @@ function SongPage() {
                 const a = audioRef.current;
                 if (!a) return;
                 if (a.paused) {
+                  window.dispatchEvent(new CustomEvent("chordlab:pause-studio"));
                   void a.play();
                   setPlaying(true);
                 } else {

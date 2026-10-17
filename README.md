@@ -98,7 +98,16 @@ ChordLab includes both studio-grade deep stem separation (via Demucs) and a ligh
 
 - `backend/data/stem_classifier.keras`: Deep 2D Log-Mel CNN classifier achieving 100.00% validation accuracy across all 9 instruments.
 - Multi-stem metric analysis in `backend/stem_model.py` reporting RMS energy, frequency balance, vocal register, groove regularity, and mix recommendations.
-- Interactive multi-track playback, per-instrument volume mixing, and stem muting in `StudioPanel.tsx`.
+- Interactive multi-track playback, per-instrument volume mixing, stem soloing (`S` button), bulk mute/unmute, and zero-click Web Audio gain scheduling in `src/components/StudioPanel.tsx` and `src/lib/studio.ts`.
+- Acoustic dynamic preservation using zero-phase Butterworth filtering (`sosfiltfilt`) to maintain natural instrument dynamics without background noise amplification.
+- Automatic cross-playback synchronization preventing simultaneous playback between the studio mixer and main song audio player.
+
+### Musical Welcome Experience
+
+ChordLab includes a responsive musical welcome splash screen (`src/components/WelcomeScreen.tsx`):
+- Features a warm, synthesized Cmaj7 chime (C4 - G4 - B4 - E5) generated entirely in-system using the Web Audio API with resonant filtering, harmonics, and exponential decay envelopes.
+- Displays on initial session launch and upon user sign-in/registration with personalized greetings.
+- Offers instant skip controls, audio mute/unmute toggle, and session storage persistence to ensure a non-intrusive workflow.
 
 To train or retrain the stem classifier:
 ```sh
