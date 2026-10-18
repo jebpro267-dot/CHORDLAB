@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ChordLab</string>
+    <string name="title_activity_main">ChordLab</string>
+    <string name="package_name">app.chordlab.mobile</string>
+    <string name="custom_url_scheme">app.chordlab.mobile</string>
+</resources>

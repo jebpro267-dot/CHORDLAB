@@ -214,7 +214,81 @@ FastAPI loads the root `.env` file. Relevant settings:
 Install Demucs in the Python environment used by the API to enable stem
 separation, for example with
 `pip install -U git+https://github.com/facebookresearch/demucs.git`. Do not
-expose `AI_API_KEY` in a `VITE_` variable. In production,
-deploy the frontend and FastAPI service separately, set the frontend's
-`VITE_BACKEND_URL` to the public API origin, and configure the corresponding
-`CORS_ORIGINS` value on FastAPI.
+expose `AI_API_KEY` in a `VITE_` variable.
+
+## Production Server & Deployment
+
+ChordLab provides a **unified production server** architecture where a single FastAPI
+instance serves the complete application stack on one port (default `8000`):
+- **User Application**: Served at `/` with client-side SPA routing.
+- **Admin Console**: Served at `/admin/` with client-side SPA routing.
+- **Backend API**: Endpoints at `/api/*` and interactive documentation at `/docs`.
+- **Static Assets**: Hashed production bundles served from `/assets/` with immutable caching.
+
+Because the API and web apps run on the exact same origin in production, `VITE_BACKEND_URL`
+remains unset, eliminating CORS overhead, extra ports, and multi-service complexity.
+
+### 1. Docker & Docker Compose (Recommended)
+
+Run ChordLab in an isolated, multi-stage production container with persistent storage:
+
+```sh
+# Copy environment configuration
+cp .env.example .env
+
+# Build and start the unified server
+docker compose up -d --build
+
+# Inspect running logs
+docker compose logs -f
+
+# Stop the container
+docker compose down
+```
+
+The container automatically:
+- Builds both the user and admin frontends in a clean Node 20 environment.
+- Provisions a lightweight Python 3.10 runtime with PyTorch CPU, FFmpeg, Demucs, and TensorFlow.
+- Mounts `./backend/data` into `/app/backend/data` so user accounts, SQLite database, dynamic settings, and trained ML models persist across restarts.
+- Exposes port `8000` with active container healthchecks (`/health`).
+
+### 2. Standalone Production Server (Bare-Metal / VPS)
+
+To run the unified server directly on Windows, Linux, or macOS without Docker:
+
+```sh
+# 1. Build the production frontends
+npm run build
+
+# 2. Launch the unified server
+# On Windows:
+start-server.bat
+# Or using npm:
+npm run serve
+# On Linux / macOS:
+chmod +x start-server.sh
+./start-server.sh
+```
+
+The server binds to `http://0.0.0.0:8000`. You can configure the port by setting the `PORT`
+environment variable (e.g. `PORT=80` or `PORT=8000`).
+
+### 3. Native Android Application (Capacitor)
+
+The mobile client is packaged with Capacitor in `android/`:
+
+```sh
+# 1. Build the production web assets
+npm run build
+
+# 2. Sync web assets into the Android native shell
+npx cap sync
+
+# 3. Compile the debug APK
+cd android
+./gradlew assembleDebug
+
+# Output APK path:
+# android/app/build/outputs/apk/debug/app-debug.apk
+```
+

@@ -19,6 +19,8 @@ from urllib.parse import quote, urlsplit
 import httpx
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl
 from starlette.concurrency import run_in_threadpool
 from dotenv import load_dotenv
@@ -1321,3 +1323,58 @@ async def romanize(data: RomanizeRequest) -> dict[str, str]:
         if fallback is not None:
             return {"text": fallback}
         raise HTTPException(502, "Transliteration failed. Please try again.") from error
+
+
+# ---------------------------------------------------------------------------
+# Unified Static Frontend & SPA Serving
+# ---------------------------------------------------------------------------
+DIST_DIR = ROOT / "dist"
+
+if DIST_DIR.is_dir():
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    @app.get("/admin")
+    @app.get("/admin/")
+    @app.get("/admin/{admin_path:path}")
+    async def serve_admin(admin_path: str = ""):
+        """Serve the standalone administrator console single-page application."""
+        if admin_path:
+            candidate = (DIST_DIR / "admin" / admin_path).resolve()
+            if candidate.is_file() and candidate.is_relative_to(DIST_DIR / "admin"):
+                return FileResponse(candidate)
+        admin_index = DIST_DIR / "admin" / "index.html"
+        if admin_index.is_file():
+            return FileResponse(
+                admin_index,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
+        raise HTTPException(404, "Admin console assets not found. Run 'npm run build' first.")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str = ""):
+        """Serve the ChordLab client single-page application and static assets."""
+        if full_path.startswith(("api/", "health", "docs", "redoc", "openapi.json")):
+            raise HTTPException(404, "Endpoint not found")
+
+        if full_path:
+            candidate = (DIST_DIR / full_path).resolve()
+            if candidate.is_file() and candidate.is_relative_to(DIST_DIR):
+                return FileResponse(candidate)
+
+        user_index = DIST_DIR / "index.html"
+        if user_index.is_file():
+            return FileResponse(
+                user_index,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
+        return {"status": "ok", "message": "ChordLab API running. Run 'npm run build' to serve web UI."}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("backend.main:app", host=host, port=port, reload=False)

@@ -5,7 +5,12 @@
   "type": "module",
   "scripts": {
     "start": "start.bat",
+    "start:server": "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000",
     "start:all": "start.bat",
+    "serve": "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
     "dev": "vite dev",
     "dev:admin": "vite --config vite.admin.config.ts",
     "build": "vite build",

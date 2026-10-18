@@ -1,0 +1,25 @@
+services:
+  chordlab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chordlab-server
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - PORT=8000
+      - HOST=0.0.0.0
+      - APP_DATABASE_PATH=/app/backend/data/chordlab.sqlite3
+    volumes:
+      # Mount the persistent SQLite database, settings, and ML models
+      - ./backend/data:/app/backend/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
