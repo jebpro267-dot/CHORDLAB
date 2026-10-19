@@ -1,15 +1,40 @@
-const backendBaseUrl = (import.meta.env["VITE_BACKEND_URL"] || "").replace(/\/+$/, "");
+/**
+ * Returns the currently active backend base URL.
+ * Checks localStorage for user-specified server override, falling back to VITE_BACKEND_URL.
+ */
+export function getBackendBaseUrl(): string {
+  try {
+    const custom = localStorage.getItem("chordlab_backend_url");
+    if (custom && custom.trim()) return custom.trim().replace(/\/+$/, "");
+  } catch {
+    // ignore
+  }
+  return (import.meta.env["VITE_BACKEND_URL"] || "").replace(/\/+$/, "");
+}
+
+/**
+ * Persists a custom backend server URL to localStorage.
+ */
+export function setBackendBaseUrl(url: string): void {
+  try {
+    if (!url || !url.trim()) {
+      localStorage.removeItem("chordlab_backend_url");
+    } else {
+      localStorage.setItem("chordlab_backend_url", url.trim().replace(/\/+$/, ""));
+    }
+  } catch {
+    // ignore
+  }
+}
 
 /**
  * Resolves an API path against the configured backend base URL.
- * The base URL is set via the `VITE_BACKEND_URL` environment variable;
- * when empty the path is treated as relative to the current origin.
  *
  * @param path - Absolute path string starting with `/` (e.g. `/api/lyrics`).
  * @returns Full URL string ready for use in `fetch`.
  */
 export function backendUrl(path: string): string {
-  return `${backendBaseUrl}${path}`;
+  return `${getBackendBaseUrl()}${path}`;
 }
 
 /**

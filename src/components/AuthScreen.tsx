@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react";
-import { LoaderCircle, Music2, UserRoundPlus } from "lucide-react";
+import { Check, Globe, LoaderCircle, Music2, RefreshCw, Server, UserRoundPlus } from "lucide-react";
 
 import { useAuth } from "@/lib/auth";
+import { getBackendBaseUrl, setBackendBaseUrl } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,6 +16,9 @@ import { Label } from "@/components/ui/label";
 export function AuthScreen() {
   const { signIn, register } = useAuth();
   const [mode, setMode] = useState<"signin" | "register">("signin");
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [serverUrlInput, setServerUrlInput] = useState(() => getBackendBaseUrl());
+  const [serverStatus, setServerStatus] = useState<string | null>(null);
   const [email, setEmail] = useState(() => {
     try {
       return localStorage.getItem("chordlab-saved-email") || "jebin";
@@ -63,8 +67,21 @@ export function AuthScreen() {
           },
         }),
       );
+      setError("");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not authenticate.");
+      const msg = reason instanceof Error ? reason.message : "Could not authenticate.";
+      if (
+        msg.toLowerCase().includes("failed to fetch") ||
+        msg.toLowerCase().includes("networkerror") ||
+        msg.toLowerCase().includes("network request failed")
+      ) {
+        setError(
+          `Cannot reach backend server (${getBackendBaseUrl() || "relative / same-origin"}). Please check your internet or update the Server URL below.`
+        );
+        setShowServerConfig(true);
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -152,6 +169,106 @@ export function AuthScreen() {
             ) : null}
             {busy ? "Please wait…" : mode === "register" ? "Create account" : "Sign in"}
           </Button>
+
+          {/* Server Connection Configuration */}
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => setShowServerConfig(!showServerConfig)}
+              className="flex w-full items-center justify-between rounded-lg border border-border/40 bg-surface-2/60 px-3 py-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <span className="flex items-center gap-1.5 truncate">
+                <Server className="size-3.5 text-primary" />
+                <span className="truncate">
+                  Server: <span className="font-mono text-[11px] text-foreground">{getBackendBaseUrl() || "Default (Same-Origin)"}</span>
+                </span>
+              </span>
+              <span className="text-[11px] font-medium text-primary">
+                {showServerConfig ? "Close" : "Change"}
+              </span>
+            </button>
+
+            {showServerConfig && (
+              <div className="mt-2 space-y-2 rounded-lg border border-border/60 bg-surface-2 p-3 text-xs">
+                <Label htmlFor="custom-server-url" className="text-[11px] text-muted-foreground">
+                  Backend API URL (Cloudflare Tunnel, LAN IP, or Remote Domain)
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="custom-server-url"
+                    type="url"
+                    placeholder="https://...trycloudflare.com or http://192.168.x.x:8000"
+                    value={serverUrlInput}
+                    onChange={(e) => {
+                      setServerUrlInput(e.target.value);
+                      setServerStatus(null);
+                    }}
+                    className="h-8 text-xs font-mono"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={async () => {
+                      const url = serverUrlInput.trim().replace(/\/+$/, "");
+                      setBackendBaseUrl(url);
+                      setServerStatus("Testing connection...");
+                      try {
+                        const target = url ? `${url}/health` : "/health";
+                        const res = await fetch(target, { signal: AbortSignal.timeout(6000) });
+                        if (res.ok) {
+                          setServerStatus("Connected (HTTP 200 OK)");
+                          setError("");
+                        } else {
+                          setServerStatus(`Error: HTTP ${res.status}`);
+                        }
+                      } catch {
+                        setServerStatus("Unreachable (Check URL / internet)");
+                      }
+                    }}
+                  >
+                    Save
+                  </Button>
+                </div>
+                {serverStatus && (
+                  <p
+                    className={`text-[11px] font-medium ${
+                      serverStatus.includes("Connected")
+                        ? "text-emerald-400"
+                        : "text-amber-400"
+                    }`}
+                  >
+                    {serverStatus}
+                  </p>
+                )}
+                <div className="flex justify-between pt-1 text-[11px] text-muted-foreground">
+                  <button
+                    type="button"
+                    className="hover:underline"
+                    onClick={() => {
+                      const tunnel = "https://poker-stephen-rapids-stack.trycloudflare.com";
+                      setServerUrlInput(tunnel);
+                      setBackendBaseUrl(tunnel);
+                      setServerStatus("Set to active Cloudflare tunnel");
+                    }}
+                  >
+                    Use active tunnel
+                  </button>
+                  <button
+                    type="button"
+                    className="hover:underline"
+                    onClick={() => {
+                      setServerUrlInput("");
+                      setBackendBaseUrl("");
+                      setServerStatus("Reset to default");
+                    }}
+                  >
+                    Reset default
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </form>
       </section>
     </main>

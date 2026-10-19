@@ -292,3 +292,9 @@ cd android
 # android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+### 4. Dynamic Server URL Configuration & Mobile Connectivity
+
+The mobile client and web applications support runtime server URL switching with persistence in `localStorage`:
+- **In-App Server Switcher**: On the sign-in screen, users can tap `Server: (Change)` to inspect the active backend, test server reachability (`/health`), and switch endpoints on the fly (e.g. to a live Cloudflare Tunnel `*.trycloudflare.com` or a local Wi-Fi IP `http://192.168.x.x:8000`).
+- **Resilient Offline / Network Detection**: Connection errors provide direct guidance and one-tap access to server settings rather than generic network failure messages.
+
