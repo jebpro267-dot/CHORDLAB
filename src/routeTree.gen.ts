@@ -12,7 +12,9 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AnalyzeRouteImport } from './routes/analyze'
 import { Route as ChordsRouteImport } from './routes/chords'
+import { Route as CreateRouteImport } from './routes/create'
 import { Route as LiveRouteImport } from './routes/live'
+import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as TunerRouteImport } from './routes/tuner'
 import { Route as SongIdRouteImport } from './routes/song.$id'
 
@@ -31,9 +33,19 @@ const ChordsRoute = ChordsRouteImport.update({
   path: '/chords',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CreateRoute = CreateRouteImport.update({
+  id: '/create',
+  path: '/create',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LiveRoute = LiveRouteImport.update({
   id: '/live',
   path: '/live',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsRoute = SettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
 const TunerRoute = TunerRouteImport.update({
@@ -51,7 +63,9 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/analyze': typeof AnalyzeRoute
   '/chords': typeof ChordsRoute
+  '/create': typeof CreateRoute
   '/live': typeof LiveRoute
+  '/settings': typeof SettingsRoute
   '/tuner': typeof TunerRoute
   '/song/$id': typeof SongIdRoute
 }
@@ -59,7 +73,9 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/analyze': typeof AnalyzeRoute
   '/chords': typeof ChordsRoute
+  '/create': typeof CreateRoute
   '/live': typeof LiveRoute
+  '/settings': typeof SettingsRoute
   '/tuner': typeof TunerRoute
   '/song/$id': typeof SongIdRoute
 }
@@ -68,24 +84,52 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/analyze': typeof AnalyzeRoute
   '/chords': typeof ChordsRoute
+  '/create': typeof CreateRoute
   '/live': typeof LiveRoute
+  '/settings': typeof SettingsRoute
   '/tuner': typeof TunerRoute
   '/song/$id': typeof SongIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/analyze' | '/chords' | '/live' | '/tuner' | '/song/$id'
+  fullPaths:
+    | '/'
+    | '/analyze'
+    | '/chords'
+    | '/create'
+    | '/live'
+    | '/settings'
+    | '/tuner'
+    | '/song/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/analyze' | '/chords' | '/live' | '/tuner' | '/song/$id'
+  to:
+    | '/'
+    | '/analyze'
+    | '/chords'
+    | '/create'
+    | '/live'
+    | '/settings'
+    | '/tuner'
+    | '/song/$id'
   id:
-    '__root__' | '/' | '/analyze' | '/chords' | '/live' | '/tuner' | '/song/$id'
+    | '__root__'
+    | '/'
+    | '/analyze'
+    | '/chords'
+    | '/create'
+    | '/live'
+    | '/settings'
+    | '/tuner'
+    | '/song/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AnalyzeRoute: typeof AnalyzeRoute
   ChordsRoute: typeof ChordsRoute
+  CreateRoute: typeof CreateRoute
   LiveRoute: typeof LiveRoute
+  SettingsRoute: typeof SettingsRoute
   TunerRoute: typeof TunerRoute
   SongIdRoute: typeof SongIdRoute
 }
@@ -113,11 +157,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChordsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/create': {
+      id: '/create'
+      path: '/create'
+      fullPath: '/create'
+      preLoaderRoute: typeof CreateRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/live': {
       id: '/live'
       path: '/live'
       fullPath: '/live'
       preLoaderRoute: typeof LiveRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings': {
+      id: '/settings'
+      path: '/settings'
+      fullPath: '/settings'
+      preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/tuner': {
@@ -141,7 +199,9 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AnalyzeRoute: AnalyzeRoute,
   ChordsRoute: ChordsRoute,
+  CreateRoute: CreateRoute,
   LiveRoute: LiveRoute,
+  SettingsRoute: SettingsRoute,
   TunerRoute: TunerRoute,
   SongIdRoute: SongIdRoute,
 }

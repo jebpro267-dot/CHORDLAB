@@ -74,3 +74,21 @@ export async function deleteAudio(id: string) {
     /* ignore */
   }
 }
+
+/**
+ * Clears all cached audio files from IndexedDB.
+ */
+export async function clearAudioStore(): Promise<void> {
+  try {
+    const db = await open();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    /* ignore */
+  }
+}
+

@@ -57,17 +57,14 @@ function LibraryPage() {
         <p className="mt-1 text-sm text-muted-foreground">{settings.appearance.home_description}</p>
       </header>
 
-      {settings.layout.show_quick_actions && <div className="mt-5 grid grid-cols-3 gap-2">
-        {([
-          { to: "/analyze", setting: "analyze", feature: settings.features.song_analysis && (settings.features.chordmini_analysis || settings.features.local_analysis), Icon: AudioLines, label: "Analyze" },
-          { to: "/live", setting: "live", feature: settings.features.live_detection, Icon: Mic, label: "Live" },
-          { to: "/tuner", setting: "tuner", feature: settings.features.tuner, Icon: Guitar, label: "Tuner" },
-        ] as const)
-          .filter(({ setting, feature }) => settings.navigation[setting] && feature)
-          .map(({ to, Icon, label }) => (
-            <QuickAction key={to} to={to as "/analyze" | "/live" | "/tuner"} Icon={Icon} label={label} />
-          ))}
-      </div>}
+      {settings.layout.show_quick_actions && (
+        <div className="mt-5 grid grid-cols-4 gap-2">
+          <QuickAction to="/analyze" Icon={AudioLines} label="Analyze" />
+          <QuickAction to="/create" Icon={Music2} label="Create" />
+          <QuickAction to="/live" Icon={Mic} label="Live Mic" />
+          <QuickAction to="/tuner" Icon={Guitar} label="Tuner" />
+        </div>
+      )}
 
       {settings.layout.show_song_search && <div className="relative mt-5">
         <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -125,7 +122,7 @@ function QuickAction({
   Icon,
   label,
 }: {
-  to: "/analyze" | "/live" | "/tuner";
+  to: "/analyze" | "/create" | "/live" | "/tuner";
   Icon: typeof AudioLines;
   label: string;
 }) {

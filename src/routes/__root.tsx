@@ -14,6 +14,7 @@ import { useAppSettings, AppSettingsProvider } from "../lib/app-settings";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { AuthScreen } from "../components/AuthScreen";
 import { WelcomeScreen } from "../components/WelcomeScreen";
+import { LogOut, Music2 } from "lucide-react";
 
 function NotFoundComponent() {
   return (
@@ -175,6 +176,42 @@ function AppFrame() {
 
       {auth.ready && auth.account ? (
         <>
+          {/* Top Application Bar with Brand and Top-Right Sign Out Button */}
+          <header className="sticky top-0 z-40 flex items-center justify-between border-b border-white/5 bg-background/85 px-4 py-2.5 backdrop-blur-xl">
+            <Link to="/" className="flex items-center gap-2 transition hover:opacity-85">
+              <div className="flex size-7 items-center justify-center rounded-lg bg-primary/20 text-primary shadow-sm shadow-primary/20">
+                <Music2 className="size-4" strokeWidth={2.5} />
+              </div>
+              <span className="font-semibold tracking-tight text-foreground">
+                {settings.appearance.app_name || "ChordLab"}
+              </span>
+              {auth.account?.role === "admin" && (
+                <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-primary">
+                  ADMIN
+                </span>
+              )}
+            </Link>
+
+            <div className="flex items-center gap-2">
+              <span className="hidden text-xs text-muted-foreground sm:inline-block max-w-[150px] truncate">
+                {auth.account?.email}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm("Are you sure you want to sign out?")) {
+                    void auth.signOut();
+                  }
+                }}
+                title="Sign out of ChordLab"
+                aria-label="Sign out"
+                className="group flex size-8 items-center justify-center rounded-lg border border-white/10 bg-card/60 text-muted-foreground transition-all duration-200 hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-400 active:scale-95"
+              >
+                <LogOut className="size-4 transition-transform group-hover:translate-x-0.5" strokeWidth={2} />
+              </button>
+            </div>
+          </header>
+
           <div className="min-h-screen pb-24">
             {ready && unavailable ? (
               <div className="mx-auto mt-20 max-w-md px-5 text-center">

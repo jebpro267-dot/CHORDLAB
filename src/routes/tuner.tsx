@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { detectPitch } from "@/lib/audio-analysis";
 import { pcToNote } from "@/lib/chords";
+import { getMicrophoneStream } from "@/lib/microphone";
 
 export const Route = createFileRoute("/tuner")({
   head: () => ({
@@ -47,9 +48,7 @@ function TunerPage() {
 
   async function start() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      });
+      const stream = await getMicrophoneStream();
       streamRef.current = stream;
       const ctx = new AudioContext();
       ctxRef.current = ctx;

@@ -7,6 +7,7 @@
  */
 
 import { pcToNote } from "./chords";
+import { getMicrophoneStream } from "./microphone";
 
 export interface ChordEvent {
   /** seconds */
@@ -1434,9 +1435,7 @@ export class LiveChordDetector {
    * @param onChord - Callback invoked each frame with `(label, chromaVector)`.
    */
   async start(onChord: (label: string, chroma: Float32Array) => void) {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
+    const stream = await getMicrophoneStream();
     this.stream = stream;
     const ctx = new AudioContext();
     this.ctx = ctx;

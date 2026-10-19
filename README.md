@@ -20,18 +20,20 @@ is separate and required on each fresh console page load.
 
 ## How It Works
 
-1. Import an audio file or record audio from the microphone. A YouTube or Spotify
-	link imports track metadata only; those services do not provide downloadable
-	audio through this app.
-2. ChordLab tries the locally hosted TensorFlow chord recognizer when enabled.
-	If it has not been trained or is unavailable, ChordMini and then Web Audio
-	analysis can provide fallbacks. ChordMini is also an optional alternative
-	engine.
-3. Optional API requests look up chord diagrams, track lyrics and link metadata.
-	Romanization uses the configured AI provider, with an offline Tanglish
-	fallback for Tamil text.
-4. The result is saved locally and can be edited, transposed, viewed as a chord
-	sheet, and exported. Studio stem separation runs Demucs in the Python API.
+1. Import an audio file, record audio from the microphone, or paste a YouTube /
+	Spotify link. Link tracks are automatically downloaded in full through the
+	backend `yt-dlp` pipeline for complete chord analysis, stem separation, and playback.
+2. ChordLab detects chords using the locally hosted multi-lingual TensorFlow models,
+	ChordMini, or client-side Web Audio analysis with specialized cadential profiles
+	for English, Hindi, and Tamil.
+3. Lyrics are fetched automatically from LRCLIB or dynamically generated on-demand
+	via Google Gemini (`gemini-3.8-flash`) with timestamped sync and phonetic
+	romanization (Tanglish and Hinglish).
+4. Studio stem separation runs Demucs in the Python API across 9 instrument stems.
+5. A built-in Music Studio (`/create`) allows musicians to compose tracks with a
+	virtual polyphonic piano, a 16-step drum sequencer, and a vocal microphone recorder.
+6. Chords and sheets can be transposed, edited, viewed as interactive sheets, exported
+	as PDF/images, or backed up via the Settings page (`/settings`).
 
 The API backend is Python with FastAPI. It provides `/api/auth/register`,
 `/api/auth/login`, `/api/auth/logout`, `/api/chord-model`, `/api/chordmini`,
@@ -109,6 +111,36 @@ ChordLab includes a responsive musical welcome splash screen (`src/components/We
 - Features a warm, synthesized Cmaj7 chime (C4 - G4 - B4 - E5) generated entirely in-system using the Web Audio API with resonant filtering, harmonics, and exponential decay envelopes.
 - Displays on initial session launch and upon user sign-in/registration with personalized greetings.
 - Offers instant skip controls, audio mute/unmute toggle, and session storage persistence to ensure a non-intrusive workflow.
+
+### Create Music Studio (`/create`)
+
+A GarageBand-style on-device musical creation suite built directly into ChordLab:
+- **Polyphonic Virtual Keyboard**: Full multi-octave touch, mouse, and QWERTY keyboard (`A` through `K`) playing with dynamic envelopes. Includes Grand Piano, Rhodes Electric Piano, and Synth Lead instrument timbres.
+- **16-Step Drum Sequencer**: Pattern-programmable drum machine supporting 4 percussive instruments (Kick, Snare, Hi-Hat, Clap) with instant rhythm presets (Rock, Hip-Hop, Dance, Trap).
+- **Vocal & Instrument Microphone Recording**: Studio microphone input track with live peak level meter, multi-take recording, and integrated metronome synchronization.
+- **Master Transport & Controls**: Global BPM tempo slider (40-240 BPM), metronome click toggle, live volume control, and zero-latency Web Audio master bus.
+- **Export & Library Integration**: Synthesize and bounce tracks directly to stereo 16-bit PCM WAV, trigger browser/device downloads, or save creations straight into your local ChordLab song library for chord analysis.
+
+### App Settings & Diagnostics (`/settings`)
+
+A dedicated configuration center in the bottom navigation:
+- **Server Connection Manager**: Live HTTP ping / latency testing (`/health`), endpoint switcher with pre-configured shortcuts (`Local Wi-Fi: 192.168.0.111:8000`, `Localhost: localhost:8000`, `Android Emulator: 10.0.2.2:8000`), and real-time reachability feedback.
+- **Chord Recognition Engine**: Toggle between Server TensorFlow Deep ACR, remote ChordMini, or offline Client Web Audio analysis.
+- **Audio Preferences**: Customize welcome chime playback and master volume levels.
+- **Backup & Portability**: Export your full song library, custom chord sheets, and settings to a JSON backup file, or restore from an existing JSON backup with one tap.
+- **Cache & Storage**: Inspect indexed songs and clear temporary cache data safely without destroying user account records.
+
+### Full-Track Link Downloader & Gemini AI Lyrics
+
+- **YouTube & Spotify Audio Pipeline**: Integrated backend `yt-dlp` service (`/api/download-audio` and `/api/audio-file/{file_name}`) that fetches full audio tracks directly on the server, downloads high-fidelity MP3/WAV files, and feeds them into the complete ACR, stem separation, and playback pipeline.
+- **Automatic & AI Lyrics Generation**: Connects to LRCLIB for verified timestamps and falls back automatically to Google Gemini (`gemini-3.8-flash`) or procedural generators for instantaneous, synchronized lyrics and Tanglish/Hinglish phonetic translations.
+
+### Android Native Microphone & WebRTC Access
+
+- Configured `android.permission.RECORD_AUDIO` and `android.permission.MODIFY_AUDIO_SETTINGS` in AndroidManifest.
+- Implemented runtime Android permission prompting and `WebChromeClient.onPermissionRequest` in `MainActivity.java` to grant WebRTC microphone access to the WebView.
+- Added resilient `getMicrophoneStream()` helper with automatic constraints fallback (`{ audio: true }`), preventing `OverconstrainedError` on mobile devices.
+
 
 To train or retrain the stem classifier:
 ```sh

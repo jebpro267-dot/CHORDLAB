@@ -23,6 +23,8 @@ import { fetchSyncedLyrics, type SyncedLine } from "@/lib/lyrics-fetch.functions
 import { romanizeLyrics } from "@/lib/lyrics.functions";
 import { newId, saveSong } from "@/lib/storage";
 import { useAppSettings } from "@/lib/app-settings";
+import { backendFetch, backendJson } from "@/lib/backend";
+import { getMicrophoneStream } from "@/lib/microphone";
 
 export const Route = createFileRoute("/analyze")({
   head: () => ({
@@ -120,48 +122,141 @@ function AnalyzePage() {
   function onPick(f: File | null) {
     if (!f) return;
     setFile(f);
-    if (!title) setTitle(f.name.replace(/\.[^.]+$/, ""));
+    const inferred = f.name.replace(/\.[^.]+$/, "");
+    if (!title) setTitle(inferred);
+    setTimeout(() => {
+      void grabLyrics(true, inferred);
+    }, 200);
   }
 
   async function runImport() {
     if (!link.trim()) return;
     setImporting(true);
     try {
-      const meta = await importLink({ data: { url: link.trim() } });
-      setTitle(meta.title);
-      if (meta.artist) setArtist(meta.artist);
-      setArtwork(meta.thumbnail);
-      toast.success(`Imported details from ${meta.source === "youtube" ? "YouTube" : "Spotify"}`);
+      toast.info("Downloading full audio track from link...");
+      const res = await backendJson<{
+        fileId: string;
+        filename: string;
+        title: string;
+        artist: string;
+        thumbnail: string;
+        duration: number;
+        audioUrl: string;
+      }>("/api/download-audio", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: link.trim() }),
+      });
+
+      const cleanTitle = res.title || "Audio Track";
+      const cleanArtist = res.artist || "";
+      const cleanArtwork = res.thumbnail || "";
+
+      setTitle(cleanTitle);
+      if (cleanArtist) setArtist(cleanArtist);
+      if (cleanArtwork) setArtwork(cleanArtwork);
+
+      // Fetch the downloaded audio file stream
+      const audioRes = await backendFetch(res.audioUrl);
+      if (!audioRes.ok) throw new Error("Could not retrieve downloaded audio");
+      const blob = await audioRes.blob();
+      const downloadedFile = new File([blob], res.filename || "track.mp3", { type: "audio/mpeg" });
+      setFile(downloadedFile);
+
+      toast.success(`Full song downloaded! Fetching lyrics & analyzing...`);
+
+      // Automatically fetch or generate beat-synced lyrics
+      const syncedResult = await grabLyrics(false, cleanTitle, cleanArtist, res.duration);
+
+      // Automatically run analysis on the entire downloaded song
+      void run(downloadedFile, cleanTitle, cleanArtist, cleanArtwork, syncedResult);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not read that link");
+      console.warn("Full audio download fallback to oEmbed metadata:", e);
+      try {
+        const meta = await importLink({ data: { url: link.trim() } });
+        setTitle(meta.title);
+        if (meta.artist) setArtist(meta.artist);
+        setArtwork(meta.thumbnail);
+        toast.info(`Imported metadata for ${meta.title}. Please pick or record audio.`);
+      } catch (err) {
+        toast.error(e instanceof Error ? e.message : "Could not process link");
+      }
     } finally {
       setImporting(false);
     }
   }
 
-  async function grabLyrics(silent = false): Promise<SyncedLine[]> {
-    if (!title.trim()) {
+  async function grabLyrics(
+    silent = false,
+    lookupTitle?: string,
+    lookupArtist?: string,
+    durationHint?: number,
+  ): Promise<SyncedLine[]> {
+    const t = (lookupTitle || title).trim();
+    const a = (lookupArtist || artist).trim();
+    if (!t) {
       if (!silent) toast.error("Add a title first");
       return [];
     }
     setFetchingLyrics(true);
     try {
       const res = await fetchSyncedLyrics({
-        data: { title: title.trim(), ...(artist.trim() ? { artist: artist.trim() } : {}) },
+        data: { title: t, ...(a ? { artist: a } : {}), ...(durationHint ? { duration: durationHint } : {}) },
       });
-      if (!res.found) {
-        if (!silent) toast.error("No lyrics found for that title");
-        return [];
+      if (res.found && (res.plain || res.synced.length)) {
+        setLyrics(res.plain);
+        setSynced(res.synced);
+        if (!silent) {
+          toast.success(
+            res.synced.length ? "Found time-synced lyrics" : "Found lyrics (no timings available)",
+          );
+        }
+        return res.synced;
       }
-      setLyrics(res.plain);
-      setSynced(res.synced);
-      if (!silent) {
-        toast.success(
-          res.synced.length ? "Found time-synced lyrics" : "Found lyrics (no timings available)",
-        );
+      // If public database misses, directly generate lyrics using AI!
+      const gen = await backendJson<{ found: boolean; plain: string; synced: SyncedLine[] }>(
+        "/api/generate-lyrics",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            title: t,
+            artist: a || undefined,
+            duration: durationHint || undefined,
+          }),
+        },
+      );
+      if (gen.found && (gen.plain || gen.synced.length)) {
+        setLyrics(gen.plain);
+        setSynced(gen.synced);
+        if (!silent) toast.success("AI generated beat-synchronized lyrics!");
+        return gen.synced;
       }
-      return res.synced;
+      if (!silent) toast.error("No lyrics found or generated");
+      return [];
     } catch {
+      try {
+        const gen = await backendJson<{ found: boolean; plain: string; synced: SyncedLine[] }>(
+          "/api/generate-lyrics",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              title: t,
+              artist: a || undefined,
+              duration: durationHint || undefined,
+            }),
+          },
+        );
+        if (gen.found && (gen.plain || gen.synced.length)) {
+          setLyrics(gen.plain);
+          setSynced(gen.synced);
+          if (!silent) toast.success("AI generated beat-synchronized lyrics!");
+          return gen.synced;
+        }
+      } catch {
+        // ignore
+      }
       if (!silent) toast.error("Lyrics lookup failed");
       return [];
     } finally {
@@ -175,9 +270,7 @@ function AnalyzePage() {
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-      });
+      const stream = await getMicrophoneStream();
       const rec = new MediaRecorder(stream);
       recorderRef.current = rec;
       const chunks: BlobPart[] = [];
@@ -194,21 +287,33 @@ function AnalyzePage() {
       setRecSecs(0);
       rec.start();
       setRecording(true);
-    } catch {
-      toast.error("Microphone access was blocked");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Microphone access was blocked");
     }
   }
 
-  async function run() {
-    if (!file) {
+  async function run(
+    overrideFile?: File,
+    overrideTitle?: string,
+    overrideArtist?: string,
+    overrideArtwork?: string,
+    overrideSynced?: SyncedLine[],
+  ) {
+    const targetFile = overrideFile || file;
+    if (!targetFile) {
       toast.error("Choose an audio file first");
       return;
     }
+    const currentTitle = (overrideTitle || title).trim();
+    const currentArtist = (overrideArtist || artist).trim();
+    const currentArtwork = (overrideArtwork || artwork).trim();
+    const currentSynced = overrideSynced || synced;
+
     setBusy(true);
     setProgress(2);
     setStage("Decoding audio");
     try {
-      const arrayBuffer = await file.arrayBuffer();
+      const arrayBuffer = await targetFile.arrayBuffer();
       const ctx = new OfflineAudioContext(1, 1, 22050);
       const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
 
@@ -219,7 +324,7 @@ function AnalyzePage() {
       if (selectedEngine === "tensorflow" && settings.features.tensorflow_analysis) {
         setStage(`Analysing with your TensorFlow model (${acrLanguage})`);
         setProgress(15);
-        const outcome = await analyzeWithTensorFlow(file, decoded.duration, acrLanguage);
+        const outcome = await analyzeWithTensorFlow(targetFile, decoded.duration, acrLanguage);
         if (outcome.ok) {
           analysis = outcome.analysis;
           engine = "tensorflow";
@@ -234,7 +339,7 @@ function AnalyzePage() {
           );
           if (settings.features.chordmini_analysis) {
             setStage("TensorFlow unavailable — trying ChordMini");
-            const fallback = await analyzeWithChordMini(file, decoded.duration, {
+            const fallback = await analyzeWithChordMini(targetFile, decoded.duration, {
               beatModel: "auto",
               chordModel,
             });
@@ -256,7 +361,7 @@ function AnalyzePage() {
       ) {
         setStage("Analysing with ChordMini");
         setProgress(15);
-        const outcome = await analyzeWithChordMini(file, decoded.duration, {
+        const outcome = await analyzeWithChordMini(targetFile, decoded.duration, {
           beatModel: selectedEngine === "chordmini-auto" ? "auto" : selectedEngine,
           chordModel,
         });
@@ -300,11 +405,11 @@ function AnalyzePage() {
       }
 
       let lyricText = lyrics;
-      let syncedLines = synced;
-      if (!lyricText.trim() && title.trim() && settings.features.lyrics_lookup) {
+      let syncedLines = currentSynced;
+      if (!lyricText.trim() && currentTitle && settings.features.lyrics_lookup) {
         setStage("Looking up lyrics");
         setProgress(88);
-        const found = await grabLyrics(true);
+        const found = await grabLyrics(true, currentTitle, currentArtist, decoded.duration);
         if (found.length) syncedLines = found;
         lyricText = found.length ? found.map((l) => l.text).join("\n") : lyricText;
       }
@@ -324,11 +429,12 @@ function AnalyzePage() {
       const id = newId();
       setStage("Saving");
       setProgress(97);
-      await putAudio(id, file);
+      await putAudio(id, targetFile);
       saveSong({
         id,
-        title: title.trim() || "Untitled",
-        artist: artist.trim(),
+        title: currentTitle || targetFile.name.replace(/\.[^.]+$/, ""),
+        artist: currentArtist,
+        artwork: currentArtwork || undefined,
         createdAt: Date.now(),
         analysis,
         lyrics: lyricText,
