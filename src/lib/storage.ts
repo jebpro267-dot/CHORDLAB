@@ -9,6 +9,7 @@ export interface Song {
   id: string;
   title: string;
   artist: string;
+  artwork?: string | undefined;
   createdAt: number;
   analysis: AnalysisResult;
   /** raw lyrics pasted by the user */

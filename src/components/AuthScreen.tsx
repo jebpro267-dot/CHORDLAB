@@ -246,7 +246,7 @@ export function AuthScreen() {
                     type="button"
                     className="hover:underline"
                     onClick={() => {
-                      const tunnel = "https://poker-stephen-rapids-stack.trycloudflare.com";
+                      const tunnel = "https://williams-opt-review-andreas.trycloudflare.com";
                       setServerUrlInput(tunnel);
                       setBackendBaseUrl(tunnel);
                       setServerStatus("Set to active Cloudflare tunnel");

@@ -1,3 +1,5 @@
+import { playRealSampledNote, playRealStudioDrum } from "./real-instruments";
+
 // Studio DAW Audio Engine for ChordLab (Physical Modeling & Acoustic Instrument Synthesis)
 
 export type DawInstrumentCategory =
@@ -217,6 +219,12 @@ export function playDawInstrumentSound(
   velocity = 0.85,
   destination: AudioNode = ctx.destination
 ): { stop: () => void } {
+  // 1. Try real acoustic soundfont sample first (Steinway Grand, Martin Acoustic, Fender Strat, etc.)
+  const realSample = playRealSampledNote(ctx, instrument, note, time, duration, velocity, destination);
+  if (realSample) {
+    return realSample;
+  }
+
   const freq = noteToFrequency(note);
   const stopCallbacks: (() => void)[] = [];
 
@@ -821,6 +829,8 @@ export function playDawDrumSound(
   velocity = 0.9,
   destination: AudioNode = ctx.destination
 ) {
+  playRealStudioDrum(ctx, type, time, velocity, destination);
+  return;
   switch (type) {
     case "kick": {
       const osc = ctx.createOscillator();

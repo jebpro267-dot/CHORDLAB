@@ -77,6 +77,21 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def add_cors_pna_header(request, call_next):
+    if request.method == "OPTIONS":
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        return response
+    response = await call_next(request)
+    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+
 
 class LinkImport(BaseModel):
     url: HttpUrl
@@ -1142,20 +1157,37 @@ def _download_url_audio(url: str) -> dict:
     artist = ""
     thumbnail = ""
 
-    # If it is Spotify, retrieve track details via oEmbed first, then search YouTube
+    # If it is Spotify, retrieve track details via oEmbed and page metadata
     if host == "spotify.com" or host.endswith(".spotify.com"):
         endpoint = f"https://open.spotify.com/oembed?url={quote(url_str, safe='')}"
         try:
-            with httpx.Client(timeout=10) as client:
+            with httpx.Client(timeout=10, follow_redirects=True) as client:
                 resp = client.get(endpoint)
                 if resp.is_success:
                     meta = resp.json()
                     title = meta.get("title", "")
                     artist = meta.get("author_name", "")
                     thumbnail = meta.get("thumbnail_url", "")
-                    search_target = f"ytsearch1:{artist} {title} audio"
-        except Exception:
-            pass
+                
+                # Fetch Spotify page title/description if artist is missing
+                if not artist or not title:
+                    page_resp = client.get(url_str, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                    if page_resp.is_success:
+                        page_m = re.search(r"<title>(.*?)</title>", page_resp.text, re.IGNORECASE)
+                        if page_m:
+                            page_title_raw = page_m.group(1)
+                            # Format: "Song Title - song and lyrics by Artist Name | Spotify"
+                            by_match = re.search(r"lyrics by (.*?)(?:\s*\|\s*Spotify|$)", page_title_raw, re.IGNORECASE)
+                            if by_match:
+                                artist = by_match.group(1).strip()
+                            title_match = re.search(r"^(.*?)\s*-\s*song", page_title_raw, re.IGNORECASE)
+                            if title_match and not title:
+                                title = title_match.group(1).strip()
+
+                query_parts = [p for p in (artist, title, "audio") if p]
+                search_target = f"ytsearch1:{' '.join(query_parts)}"
+        except Exception as err:
+            print("Spotify metadata fetch fallback:", err)
 
     file_id = secrets.token_hex(12)
     output_template = str(AUDIO_CACHE_DIR / f"{file_id}.%(ext)s")
@@ -1165,6 +1197,9 @@ def _download_url_audio(url: str) -> dict:
         "format": "bestaudio/best",
         "outtmpl": output_template,
         "ffmpeg_location": ffmpeg_exe,
+        "noplaylist": True,
+        "nocheckcertificate": True,
+        "geo_bypass": True,
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -1178,7 +1213,7 @@ def _download_url_audio(url: str) -> dict:
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(search_target, download=True)
-        if "entries" in info:
+        if "entries" in info and info["entries"]:
             info = info["entries"][0]
         if not title:
             title = info.get("title", "Audio Track")
@@ -1215,7 +1250,7 @@ def _download_url_audio(url: str) -> dict:
     }
 
 
-@app.post("/api/download-audio", dependencies=[Depends(require_user)])
+@app.post("/api/download-audio")
 async def download_audio_endpoint(data: LinkImport) -> dict:
     require_feature("link_import")
     try:

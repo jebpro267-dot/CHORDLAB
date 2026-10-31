@@ -130,10 +130,17 @@ function AnalyzePage() {
   }
 
   async function runImport() {
-    if (!link.trim()) return;
+    const rawLink = link.trim();
+    if (!rawLink) {
+      toast.error("Please paste a YouTube or Spotify link first");
+      return;
+    }
     setImporting(true);
+    setBusy(true);
+    setProgress(8);
+    setStage("Downloading full track from link");
     try {
-      toast.info("Downloading full audio track from link...");
+      toast.info("Downloading full song audio from link...");
       const res = await backendJson<{
         fileId: string;
         filename: string;
@@ -145,7 +152,7 @@ function AnalyzePage() {
       }>("/api/download-audio", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: link.trim() }),
+        body: JSON.stringify({ url: rawLink }),
       });
 
       const cleanTitle = res.title || "Audio Track";
@@ -156,31 +163,29 @@ function AnalyzePage() {
       if (cleanArtist) setArtist(cleanArtist);
       if (cleanArtwork) setArtwork(cleanArtwork);
 
-      // Fetch the downloaded audio file stream
+      setProgress(25);
+      setStage("Retrieving full audio stream");
       const audioRes = await backendFetch(res.audioUrl);
-      if (!audioRes.ok) throw new Error("Could not retrieve downloaded audio");
+      if (!audioRes.ok) throw new Error("Could not retrieve downloaded audio file");
       const blob = await audioRes.blob();
       const downloadedFile = new File([blob], res.filename || "track.mp3", { type: "audio/mpeg" });
       setFile(downloadedFile);
 
-      toast.success(`Full song downloaded! Fetching lyrics & analyzing...`);
+      toast.success(`Full song downloaded! Fetching lyrics and detecting chords across entire track...`);
+      setProgress(35);
 
-      // Automatically fetch or generate beat-synced lyrics
-      const syncedResult = await grabLyrics(false, cleanTitle, cleanArtist, res.duration);
+      // Fetch or generate beat-synced lyrics
+      const syncedResult = await grabLyrics(true, cleanTitle, cleanArtist, res.duration);
 
-      // Automatically run analysis on the entire downloaded song
-      void run(downloadedFile, cleanTitle, cleanArtist, cleanArtwork, syncedResult);
+      // Run full audio analysis across the entire song
+      await run(downloadedFile, cleanTitle, cleanArtist, cleanArtwork, syncedResult);
     } catch (e) {
-      console.warn("Full audio download fallback to oEmbed metadata:", e);
-      try {
-        const meta = await importLink({ data: { url: link.trim() } });
-        setTitle(meta.title);
-        if (meta.artist) setArtist(meta.artist);
-        setArtwork(meta.thumbnail);
-        toast.info(`Imported metadata for ${meta.title}. Please pick or record audio.`);
-      } catch (err) {
-        toast.error(e instanceof Error ? e.message : "Could not process link");
-      }
+      console.warn("Audio link download error:", e);
+      const errMsg = e instanceof Error ? e.message : "Could not download audio from link";
+      toast.error(`Download failed: ${errMsg}`);
+      setBusy(false);
+      setProgress(0);
+      setStage("");
     } finally {
       setImporting(false);
     }
@@ -475,20 +480,35 @@ function AnalyzePage() {
 
       <div className="panel mt-5 p-4">
         {settings.features.link_import && <>
-          <Label htmlFor="link">YouTube or Spotify link</Label>
+          <Label htmlFor="link" className="text-sm font-semibold flex items-center gap-2">
+            <Link2 className="size-4 text-primary" />
+            <span>YouTube, Spotify or Web Audio Link</span>
+          </Label>
           <p className="mt-1 text-xs text-muted-foreground">
-            Imports the title, artist and artwork. Streaming apps don't allow their audio to be
-            downloaded, so record the track as it plays or pick the file below.
+            Paste any YouTube video, Spotify track, or web audio link. ChordLab will automatically download the full track and directly analyze chords, key, tempo and synced lyrics across the entire song.
           </p>
-          <div className="mt-2 flex gap-2">
+          <div className="mt-3 flex flex-col sm:flex-row gap-2">
             <Input
               id="link"
               value={link}
-              placeholder="https://youtu.be/… or open.spotify.com/track/…"
+              placeholder="https://youtu.be/... or open.spotify.com/track/..."
               onChange={(e) => setLink(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void runImport();
+                }
+              }}
+              className="flex-1 font-mono text-xs"
             />
-            <Button variant="secondary" onClick={() => void runImport()} disabled={importing}>
-              {importing ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />}
+            <Button
+              variant="default"
+              onClick={() => void runImport()}
+              disabled={importing || busy}
+              className="gap-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black font-semibold shadow-md active:scale-95"
+            >
+              {importing ? <Loader2 className="size-4 animate-spin" /> : <Wand2 className="size-4" />}
+              <span>{importing ? "Downloading and Analyzing..." : "Analyze Full Song"}</span>
             </Button>
           </div>
         </>}
@@ -682,7 +702,7 @@ function AnalyzePage() {
         </div>
       )}
 
-      <Button size="lg" className="mt-5 w-full" onClick={run} disabled={busy || !file}>
+      <Button size="lg" className="mt-5 w-full" onClick={() => void run()} disabled={busy || !file}>
         <Wand2 className="size-4" />
         {busy ? "Analyzing…" : "Detect chords"}
       </Button>

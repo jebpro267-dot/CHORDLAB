@@ -21,7 +21,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { getAudio, putAudio } from "@/lib/audio-store";
 import { startSeparation } from "@/lib/separate";
-import { STEMS, STEM_LABELS, StudioPlayer, type TrackName } from "@/lib/studio";
+import { STEMS, STEM_LABELS, StudioPlayer, type StemName, type TrackName } from "@/lib/studio";
 import type { Song } from "@/lib/storage";
 
 export interface Marker {

@@ -1,3 +1,8 @@
+import {
+  preloadSoundfont,
+  GARAGEBAND_SMART_CHORDS,
+  type SmartChordVoicing,
+} from "@/lib/real-instruments";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { toast } from "sonner";
@@ -88,10 +93,10 @@ export interface AudioClip {
   startBeat: number;
   durationBeats: number;
   type: "audio" | "midi" | "drums";
-  audioBuffer?: AudioBuffer;
-  waveformPeaks?: number[];
-  notes?: NoteEvent[];
-  drumPattern?: boolean[][]; // 8 drum rows x 16 steps
+  audioBuffer?: AudioBuffer | undefined;
+  waveformPeaks?: number[] | undefined;
+  notes?: NoteEvent[] | undefined;
+  drumPattern?: boolean[][] | undefined; // 8 drum rows x 16 steps
 }
 
 export interface DawTrack {
@@ -233,6 +238,13 @@ export function CreateMusicPage() {
 
   // Add Track Modal
   const [isAddTrackOpen, setIsAddTrackOpen] = useState(false);
+
+  // GarageBand & BandLab Signature Features
+  const [instrumentViewMode, setInstrumentViewMode] = useState<"keys" | "smart_chords" | "mpc">("keys");
+  const [autoplayGroove, setAutoplayGroove] = useState<number>(0); // 0=Off, 1=Pop Strum, 2=Fingerpicking, 3=Driving Rock
+  const [activeChordName, setActiveChordName] = useState<string | null>(null);
+  const [isSoundfontLoaded, setIsSoundfontLoaded] = useState<boolean>(true);
+  const [activeMpcPad, setActiveMpcPad] = useState<string | null>(null);
 
   // Audio Context Ref
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -416,7 +428,7 @@ export function CreateMusicPage() {
           startBeat: 0,
           durationBeats: 16,
           type: "drums",
-          drumPattern: DRUM_PRESETS.Rock,
+          drumPattern: DRUM_PRESETS["Rock"]!,
         },
       ],
     },
@@ -438,9 +450,9 @@ export function CreateMusicPage() {
   ]);
 
   // Selected Track Helper
-  const selectedTrack = useMemo(() => {
-    return tracks.find((t) => t.id === selectedTrackId) ?? tracks[0];
-  }, [tracks, selectedTrackId]);
+  const selectedTrack: DawTrack = useMemo(() => {
+    return (tracks.find((t) => t.id === selectedTrackId) ?? tracks[0])!;
+  }, [tracks, selectedTrackId])!;
 
   // Audio Context Initialization
   const getAudioContext = useCallback(() => {
@@ -550,7 +562,215 @@ export function CreateMusicPage() {
     [getAudioContext]
   );
 
-  // Computer Keyboard Listeners
+  // Preload starter instruments on mount for instant high-fidelity playback
+  useEffect(() => {
+    const ctx = getAudioContext();
+    const starters: DawInstrumentType[] = [
+      "grand_piano",
+      "acoustic_guitar",
+      "modern_bass",
+      "electric_guitar_lead",
+    ];
+    starters.forEach((inst) => {
+      void preloadSoundfont(ctx, inst);
+    });
+  }, [getAudioContext]);
+
+  // Preload real studio soundfont on instrument selection
+  useEffect(() => {
+    const ctx = getAudioContext();
+    if (selectedTrack) {
+      void preloadSoundfont(ctx, selectedTrack.instrument).then((ok) => {
+        setIsSoundfontLoaded(ok);
+      });
+    }
+  }, [selectedTrack?.instrument, getAudioContext]);
+
+  // GarageBand Smart Chord Strummer & Voicings
+  const handleStrumChord = useCallback(
+    (voicing: SmartChordVoicing, zone: "strum" | "bass" | "fifth" | "treble" = "strum") => {
+      const ctx = getAudioContext();
+      if (!selectedTrack) return;
+      const trackGain = (selectedTrack.volume / 100) * masterVolume;
+
+      setActiveChordName(voicing.chordName);
+      setTimeout(() => setActiveChordName(null), 250);
+
+      const isKeys = selectedTrack.instrument.includes("piano") || selectedTrack.instrument.includes("organ");
+      let notesToPlay: string[] = [];
+      const staggerMs = isKeys ? 12 : 18;
+
+      if (zone === "bass") {
+        notesToPlay = [voicing.bassNotes[0] ?? "C2"];
+      } else if (zone === "fifth") {
+        notesToPlay = [voicing.bassNotes[1] ?? "G2"];
+      } else if (zone === "treble") {
+        notesToPlay = voicing.guitarStrum.slice(-3);
+      } else {
+        notesToPlay = isKeys ? voicing.pianoVoicing : voicing.guitarStrum;
+      }
+
+      notesToPlay.forEach((noteStr, idx) => {
+        setTimeout(() => {
+          playDawInstrumentSound(ctx, selectedTrack.instrument, noteStr, ctx.currentTime, 1.4, 0.9 * trackGain);
+          setActiveNotes((prev) => new Set(prev).add(noteStr));
+          setTimeout(() => {
+            setActiveNotes((prev) => {
+              const s = new Set(prev);
+              s.delete(noteStr);
+              return s;
+            });
+          }, 400);
+        }, idx * staggerMs);
+      });
+
+      // Record chord into MIDI track clip in real time
+      if (isRecording) {
+        const beatPosition = Math.max(0, currentBeat);
+        setTracks((prev) =>
+          prev.map((t) => {
+            if (t.id !== selectedTrack.id) return t;
+            const existingClip = t.clips[0];
+            const newEvents: NoteEvent[] = notesToPlay.map((n) => ({
+              note: n,
+              beat: beatPosition,
+              duration: 2.0,
+              velocity: 0.9,
+            }));
+            if (existingClip) {
+              return {
+                ...t,
+                clips: [{ ...existingClip, notes: [...(existingClip.notes ?? []), ...newEvents] }],
+              };
+            }
+            return t;
+          })
+        );
+      }
+    },
+    [getAudioContext, selectedTrack, masterVolume, isRecording, currentBeat]
+  );
+
+  // Master Play / Pause Toggle
+  const togglePlayPause = useCallback(() => {
+    const ctx = getAudioContext();
+    if (isPlaying) {
+      // STOP PLAYBACK
+      setIsPlaying(false);
+      setIsRecording(false);
+      activeSourcesRef.current.forEach((src) => {
+        try {
+          src.stop();
+        } catch (_) {}
+      });
+      activeSourcesRef.current = [];
+      if (playheadAnimRef.current) cancelAnimationFrame(playheadAnimRef.current);
+    } else {
+      // START PLAYBACK
+      setIsPlaying(true);
+      const secondsPerBeat = 60 / bpm;
+      const startSec = ctx.currentTime;
+      playbackStartTimeRef.current = startSec - currentBeat * secondsPerBeat;
+
+      // Helper to schedule any notes/drums within a beat slice
+      const scheduleSlice = (fromBeat: number, toBeat: number, baseStartTime: number) => {
+        const anySolo = tracks.some((t) => t.isSolo);
+        tracks.forEach((track) => {
+          if (track.isMuted) return;
+          if (anySolo && !track.isSolo) return;
+
+          const trackGain = (track.volume / 100) * masterVolume;
+
+          track.clips.forEach((clip) => {
+            // Play Real Sampled / Synthesized Notes
+            if (clip.notes && clip.notes.length > 0) {
+              clip.notes.forEach((noteEv) => {
+                if (noteEv.beat >= fromBeat && noteEv.beat < toBeat) {
+                  const noteStartSec = baseStartTime + noteEv.beat * secondsPerBeat;
+                  playDawInstrumentSound(
+                    ctx,
+                    track.instrument,
+                    noteEv.note,
+                    Math.max(ctx.currentTime, noteStartSec),
+                    noteEv.duration * secondsPerBeat,
+                    noteEv.velocity * trackGain
+                  );
+                }
+              });
+            }
+
+            // Play Drum Sequencer Pattern across full clip duration (loops every 16 steps)
+            if (clip.drumPattern) {
+              const pattern = clip.drumPattern;
+              const totalSteps = Math.max(16, Math.round(clip.durationBeats * 4));
+              for (let step = 0; step < totalSteps; step++) {
+                const stepBeat = clip.startBeat + step * 0.25;
+                if (stepBeat >= fromBeat && stepBeat < toBeat) {
+                  const stepTime = baseStartTime + stepBeat * secondsPerBeat;
+                  const patternStep = step % 16;
+                  DRUM_TYPES.forEach((drumType, rowIdx) => {
+                    if (pattern[rowIdx]?.[patternStep]) {
+                      playDawDrumSound(ctx, drumType, Math.max(ctx.currentTime, stepTime), 0.9 * trackGain);
+                    }
+                  });
+                }
+              }
+            }
+
+            // Play Recorded / Uploaded Audio Buffer
+            if (clip.audioBuffer && fromBeat <= clip.startBeat) {
+              const clipStartSec = baseStartTime + clip.startBeat * secondsPerBeat;
+              const src = ctx.createBufferSource();
+              src.buffer = clip.audioBuffer;
+              const g = ctx.createGain();
+              g.gain.setValueAtTime(trackGain, ctx.currentTime);
+              src.connect(g);
+              g.connect(ctx.destination);
+
+              if (clipStartSec >= ctx.currentTime) {
+                src.start(clipStartSec);
+              } else {
+                const offset = ctx.currentTime - clipStartSec;
+                if (offset < clip.audioBuffer.duration) {
+                  src.start(ctx.currentTime, offset);
+                }
+              }
+              activeSourcesRef.current.push(src);
+            }
+          });
+        });
+      };
+
+      // Initial schedule up to loop end or bar 32 (128 beats)
+      const initialEndBeat = isCycleActive ? (cycleEndBar - 1) * 4 : 128;
+      scheduleSlice(currentBeat, initialEndBeat, playbackStartTimeRef.current);
+
+      // Animate Playhead & Handle Continuous Seamless Looping
+      const updatePlayhead = () => {
+        const now = ctx.currentTime;
+        const elapsedSec = now - playbackStartTimeRef.current;
+        let newBeat = elapsedSec / secondsPerBeat;
+
+        // Loop handling: seamlessly wrap and re-schedule next loop iteration
+        if (isCycleActive) {
+          const loopStartBeat = (cycleStartBar - 1) * 4;
+          const loopEndBeat = (cycleEndBar - 1) * 4;
+          const loopLength = loopEndBeat - loopStartBeat;
+          if (newBeat >= loopEndBeat) {
+            newBeat = loopStartBeat + ((newBeat - loopStartBeat) % loopLength);
+            playbackStartTimeRef.current = now - newBeat * secondsPerBeat;
+            scheduleSlice(newBeat, loopEndBeat, playbackStartTimeRef.current);
+          }
+        }
+
+        setCurrentBeat(newBeat);
+        playheadAnimRef.current = requestAnimationFrame(updatePlayhead);
+      };
+      playheadAnimRef.current = requestAnimationFrame(updatePlayhead);
+    }
+  }, [isPlaying, getAudioContext, bpm, currentBeat, isCycleActive, cycleStartBar, cycleEndBar, tracks, masterVolume]);
+
+  // Computer Keyboard Listeners (Space = Play/Pause, A-K = Piano keys)
   useEffect(() => {
     const KEY_NOTE_MAP: Record<string, string> = {
       a: "C",
@@ -588,117 +808,7 @@ export function CreateMusicPage() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [currentOctave, handlePlayNote]);
-
-  // Master Play / Pause Toggle
-  const togglePlayPause = useCallback(() => {
-    const ctx = getAudioContext();
-    if (isPlaying) {
-      // STOP PLAYBACK
-      setIsPlaying(false);
-      setIsRecording(false);
-      activeSourcesRef.current.forEach((src) => {
-        try {
-          src.stop();
-        } catch (_) {}
-      });
-      activeSourcesRef.current = [];
-      if (playheadAnimRef.current) cancelAnimationFrame(playheadAnimRef.current);
-    } else {
-      // START PLAYBACK
-      setIsPlaying(true);
-      const secondsPerBeat = 60 / bpm;
-      const startSec = ctx.currentTime;
-      playbackStartTimeRef.current = startSec - currentBeat * secondsPerBeat;
-
-      // Animate Playhead
-      const updatePlayhead = () => {
-        const now = ctx.currentTime;
-        const elapsedSec = now - playbackStartTimeRef.current;
-        let newBeat = elapsedSec / secondsPerBeat;
-
-        // Loop handling
-        if (isCycleActive) {
-          const loopStartBeat = (cycleStartBar - 1) * 4;
-          const loopEndBeat = (cycleEndBar - 1) * 4;
-          const loopLength = loopEndBeat - loopStartBeat;
-          if (newBeat >= loopEndBeat) {
-            newBeat = loopStartBeat + ((newBeat - loopStartBeat) % loopLength);
-            playbackStartTimeRef.current = now - newBeat * secondsPerBeat;
-          }
-        }
-
-        setCurrentBeat(newBeat);
-        playheadAnimRef.current = requestAnimationFrame(updatePlayhead);
-      };
-      playheadAnimRef.current = requestAnimationFrame(updatePlayhead);
-
-      // Schedule Audio & MIDI notes for all tracks
-      const anySolo = tracks.some((t) => t.isSolo);
-      tracks.forEach((track) => {
-        if (track.isMuted) return;
-        if (anySolo && !track.isSolo) return;
-
-        const trackGain = (track.volume / 100) * masterVolume;
-
-        track.clips.forEach((clip) => {
-          // Play Synthesized Notes
-          if (clip.notes && clip.notes.length > 0) {
-            clip.notes.forEach((noteEv) => {
-              const noteStartSec = startSec + (noteEv.beat - currentBeat) * secondsPerBeat;
-              if (noteStartSec >= startSec) {
-                playDawInstrumentSound(
-                  ctx,
-                  track.instrument,
-                  noteEv.note,
-                  noteStartSec,
-                  noteEv.duration * secondsPerBeat,
-                  noteEv.velocity * trackGain
-                );
-              }
-            });
-          }
-
-          // Play Drums Sequencer Pattern
-          if (clip.drumPattern) {
-            const pattern = clip.drumPattern;
-            for (let step = 0; step < 16; step++) {
-              const stepBeat = clip.startBeat + step * 0.25;
-              const stepTime = startSec + (stepBeat - currentBeat) * secondsPerBeat;
-              if (stepTime >= startSec) {
-                DRUM_TYPES.forEach((drumType, rowIdx) => {
-                  if (pattern[rowIdx]?.[step]) {
-                    playDawDrumSound(ctx, drumType, stepTime, 0.9 * trackGain);
-                  }
-                });
-              }
-            }
-          }
-
-          // Play Recorded / Uploaded Audio Buffer
-          if (clip.audioBuffer) {
-            const clipStartSec = startSec + (clip.startBeat - currentBeat) * secondsPerBeat;
-            const src = ctx.createBufferSource();
-            src.buffer = clip.audioBuffer;
-            const g = ctx.createGain();
-            g.gain.setValueAtTime(trackGain, ctx.currentTime);
-            src.connect(g);
-            g.connect(ctx.destination);
-
-            if (clipStartSec >= startSec) {
-              src.start(clipStartSec);
-            } else {
-              const offset = (startSec - clipStartSec);
-              if (offset < clip.audioBuffer.duration) {
-                src.start(startSec, offset);
-              }
-            }
-            activeSourcesRef.current.push(src);
-          }
-        });
-      });
-    }
-  }, [isPlaying, getAudioContext, bpm, currentBeat, isCycleActive, cycleStartBar, cycleEndBar, tracks, masterVolume]);
+  }, [currentOctave, handlePlayNote, togglePlayPause]);
 
   // Master Record Toggle (Line-In / Mic Record Take)
   const toggleRecord = useCallback(async () => {
@@ -872,7 +982,7 @@ export function CreateMusicPage() {
           startBeat: 0,
           durationBeats: 16,
           type: "drums",
-          drumPattern: DRUM_PRESETS.Pop,
+          drumPattern: DRUM_PRESETS["Pop"]!,
         }
       ] : [],
     };
@@ -900,7 +1010,7 @@ export function CreateMusicPage() {
         if (t.id !== selectedTrack.id) return t;
         const clip = t.clips[0];
         if (!clip) return t;
-        const currentPattern = clip.drumPattern ? clip.drumPattern.map((r) => [...r]) : DRUM_PRESETS.Rock.map((r) => [...r]);
+        const currentPattern = clip.drumPattern ? clip.drumPattern.map((r) => [...r]) : DRUM_PRESETS["Rock"]!.map((r) => [...r]);
         if (!currentPattern[rowIdx]) currentPattern[rowIdx] = new Array(16).fill(false);
         currentPattern[rowIdx][stepIdx] = !currentPattern[rowIdx][stepIdx];
 
@@ -1050,17 +1160,29 @@ export function CreateMusicPage() {
           id,
           title: songTitle || "My GarageBand Creation",
           artist: "ChordLab Studio DAW",
-          detectedKey: keySignature,
-          detectedTempo: bpm,
-          hasAudio: true,
-          chords: [
-            { chord: "C", beat: 1, time: 0 },
-            { chord: "G", beat: 5, time: 2.0 },
-            { chord: "Am", beat: 9, time: 4.0 },
-            { chord: "F", beat: 13, time: 6.0 },
-          ],
-          source: "mic",
           createdAt: Date.now(),
+          lyrics: "",
+          romanized: "",
+          romanizationStyle: "auto",
+          capo: 0,
+          transpose: 0,
+          notes: "Created in ChordLab GarageBand Studio DAW",
+          analysis: {
+            duration: totalBars * 4 * (60 / bpm),
+            key: keySignature,
+            keyPc: 0,
+            mode: "major",
+            bpm,
+            timeSignature: 4,
+            beats: Array.from({ length: totalBars * 4 }, (_, b) => b * (60 / bpm)),
+            chords: [
+              { label: "C", start: 0, end: 2.0, confidence: 1.0 },
+              { label: "G", start: 2.0, end: 4.0, confidence: 1.0 },
+              { label: "Am", start: 4.0, end: 6.0, confidence: 1.0 },
+              { label: "F", start: 6.0, end: 8.0, confidence: 1.0 },
+            ],
+            beatChords: Array.from({ length: totalBars * 4 }, (_, b) => ["C", "G", "Am", "F"][Math.floor(b / 4) % 4] ?? "C"),
+          },
         };
         saveSong(newSong);
         toast.success("Saved to ChordLab library!", { id: toastId });
@@ -1325,8 +1447,8 @@ export function CreateMusicPage() {
 
                   {/* Track Controls & The 3 Action Buttons */}
                   <div className="flex items-center justify-between pt-1">
-                    {/* Mute & Solo */}
-                    <div className="flex items-center gap-1">
+                    {/* Mute & Solo + Glowing Stereo LED VU Meter */}
+                    <div className="flex items-center gap-1.5">
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -1337,7 +1459,7 @@ export function CreateMusicPage() {
                         className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center transition-all ${
                           track.isMuted ? "bg-amber-600 text-white font-extrabold" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200"
                         }`}
-                        title="Mute"
+                        title="Mute Track"
                       >
                         M
                       </button>
@@ -1351,10 +1473,19 @@ export function CreateMusicPage() {
                         className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center transition-all ${
                           track.isSolo ? "bg-yellow-400 text-black font-extrabold" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200"
                         }`}
-                        title="Solo"
+                        title="Solo Track"
                       >
                         S
                       </button>
+
+                      {/* GarageBand Glowing Stereo LED VU Meters */}
+                      <div className="flex items-end gap-0.5 h-4 px-1 py-0.5 bg-[#141519] rounded border border-zinc-800/80">
+                        <div className={`w-1 rounded-xs transition-all ${isPlaying && !track.isMuted ? "h-2 bg-emerald-400 shadow-[0_0_4px_#34d399]" : "h-1 bg-zinc-800"}`} />
+                        <div className={`w-1 rounded-xs transition-all ${isPlaying && !track.isMuted ? "h-2.5 bg-emerald-400 shadow-[0_0_4px_#34d399]" : "h-1 bg-zinc-800"}`} />
+                        <div className={`w-1 rounded-xs transition-all ${isPlaying && !track.isMuted ? "h-3 bg-emerald-400 shadow-[0_0_4px_#34d399]" : "h-1 bg-zinc-800"}`} />
+                        <div className={`w-1 rounded-xs transition-all ${isPlaying && !track.isMuted && track.volume > 65 ? "h-3 bg-amber-400 shadow-[0_0_4px_#fbbf24]" : "h-1 bg-zinc-800"}`} />
+                        <div className={`w-1 rounded-xs transition-all ${isPlaying && !track.isMuted && track.volume > 88 ? "h-3.5 bg-red-500 shadow-[0_0_5px_#ef4444]" : "h-1 bg-zinc-800"}`} />
+                      </div>
                     </div>
 
                     {/* The 3 Quick Options Badges */}
@@ -1670,207 +1801,387 @@ export function CreateMusicPage() {
         {!isDrawerCollapsed && (
           <div className="flex-1 overflow-y-auto p-3">
             {/* ======================================================== */}
-            {/* OPTION 1 CONTENT: PLAY / CREATE USING INSTRUMENT          */}
+            {/* OPTION 1 CONTENT: GARAGEBAND & BANDLAB REAL INSTRUMENTS   */}
             {/* ======================================================== */}
             {activeDrawerTab === "instrument" && (
               <div className="h-full flex flex-col justify-between">
-                {/* Drum Machine Sequencer (for Drum Kit) */}
-                {selectedTrack.instrument === "drum_kit" || selectedTrack.instrument === "percussion" ? (
-                  <div className="flex flex-col gap-2">
-                    {/* Presets & Controls */}
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-zinc-300">16-Step Drum Sequencer</span>
-                        <div className="flex items-center gap-1">
-                          {["Rock", "HipHop", "Pop", "Dance"].map((preset) => (
+                {/* SUB-HEADER: Real Sample Engine Status & Mode Switcher */}
+                <div className="flex items-center justify-between pb-2 mb-2 border-b border-zinc-800">
+                  <div className="flex items-center gap-2">
+                    {/* Mode Toggle */}
+                    {selectedTrack.instrument === "drum_kit" || selectedTrack.instrument === "percussion" ? (
+                      <div className="flex items-center p-0.5 rounded-lg bg-[#141519] border border-zinc-800">
+                        <button
+                          onClick={() => setInstrumentViewMode("keys")}
+                          className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
+                            instrumentViewMode !== "mpc" ? "bg-amber-500 text-black shadow-sm font-bold" : "text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          🥁 16-Step Grid
+                        </button>
+                        <button
+                          onClick={() => setInstrumentViewMode("mpc")}
+                          className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
+                            instrumentViewMode === "mpc" ? "bg-amber-500 text-black shadow-sm font-bold" : "text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          🎛️ BandLab 8-Pad MPC
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center p-0.5 rounded-lg bg-[#141519] border border-zinc-800">
+                        <button
+                          onClick={() => setInstrumentViewMode("keys")}
+                          className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
+                            instrumentViewMode !== "smart_chords" ? "bg-emerald-500 text-black shadow-sm font-bold" : "text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          🎹 Keyboard
+                        </button>
+                        <button
+                          onClick={() => setInstrumentViewMode("smart_chords")}
+                          className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-all ${
+                            instrumentViewMode === "smart_chords" ? "bg-emerald-500 text-black shadow-sm font-bold" : "text-zinc-400 hover:text-zinc-200"
+                          }`}
+                        >
+                          🎸 GarageBand Smart Chords
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Real Soundfont Status Badge */}
+                    <div className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-semibold">
+                      <span className="size-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                      <span>HQ Studio Sampled Instrument</span>
+                    </div>
+                  </div>
+
+                  {/* Autoplay & Tempo hint */}
+                  {instrumentViewMode === "smart_chords" && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] uppercase font-mono text-zinc-400">Autoplay:</span>
+                      <div className="flex items-center p-0.5 rounded-md bg-[#141519] border border-zinc-800">
+                        {["Off", "Pop Strum", "Fingerpick", "Rock 8ths"].map((label, idx) => (
+                          <button
+                            key={label}
+                            onClick={() => setAutoplayGroove(idx)}
+                            className={`px-2 py-0.5 text-[10px] font-bold rounded transition-all ${
+                              autoplayGroove === idx ? "bg-emerald-500 text-black" : "text-zinc-400 hover:text-zinc-200"
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ---------------------------------------------------- */}
+                {/* VIEW A: DRUM SEQUENCER OR BANDLAB MPC PADS           */}
+                {/* ---------------------------------------------------- */}
+                {(selectedTrack.instrument === "drum_kit" || selectedTrack.instrument === "percussion") ? (
+                  instrumentViewMode === "mpc" ? (
+                    /* BandLab 8-Pad Touch MPC Drum Machine */
+                    <div className="flex-1 flex flex-col justify-center">
+                      <div className="grid grid-cols-4 gap-2.5 max-w-xl mx-auto w-full p-2">
+                        {[
+                          { id: "kick", name: "KICK", key: "1", color: "from-amber-500 to-orange-600", desc: "Sub Punch" },
+                          { id: "snare", name: "SNARE", key: "2", color: "from-cyan-500 to-blue-600", desc: "Studio Snap" },
+                          { id: "hihat", name: "CH HAT", key: "3", color: "from-yellow-400 to-amber-500", desc: "Crisp 14-inch" },
+                          { id: "hihat_open", name: "OH HAT", key: "4", color: "from-lime-400 to-emerald-600", desc: "Sizzle Wash" },
+                          { id: "clap", name: "CLAP", key: "Q", color: "from-purple-500 to-indigo-600", desc: "Room Slap" },
+                          { id: "tom", name: "TOM", key: "W", color: "from-pink-500 to-rose-600", desc: "Tuned Shell" },
+                          { id: "crash", name: "CRASH", key: "E", color: "from-red-500 to-orange-600", desc: "18-inch Shimmer" },
+                          { id: "tambourine", name: "SHAKER", key: "R", color: "from-teal-400 to-emerald-600", desc: "Studio Jingle" },
+                        ].map((pad) => {
+                          const isHit = activeMpcPad === pad.id;
+                          return (
                             <button
-                              key={preset}
-                              onClick={() => handleApplyDrumPreset(preset)}
-                              className="px-2 py-0.5 rounded text-[11px] bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700"
+                              key={pad.id}
+                              onMouseDown={() => {
+                                handlePlayDrum(pad.id as DawDrumType, 1.0);
+                                setActiveMpcPad(pad.id);
+                                setTimeout(() => setActiveMpcPad(null), 120);
+                              }}
+                              onTouchStart={(e) => {
+                                e.preventDefault();
+                                handlePlayDrum(pad.id as DawDrumType, 1.0);
+                                setActiveMpcPad(pad.id);
+                                setTimeout(() => setActiveMpcPad(null), 120);
+                              }}
+                              className={`h-20 sm:h-24 rounded-xl flex flex-col justify-between p-2.5 transition-all select-none border border-white/10 shadow-lg active:scale-95 ${
+                                isHit
+                                  ? `bg-white text-black scale-98 shadow-[0_0_20px_#ffffff]`
+                                  : `bg-gradient-to-br ${pad.color} text-white hover:brightness-110`
+                              }`}
                             >
-                              {preset}
+                              <div className="flex items-center justify-between w-full">
+                                <span className="text-[10px] font-bold font-mono px-1 rounded bg-black/40">[{pad.key}]</span>
+                                <span className="text-[9px] uppercase tracking-wider text-white/80">{pad.desc}</span>
+                              </div>
+                              <div className="text-left">
+                                <span className="text-sm sm:text-base font-extrabold tracking-tight block">{pad.name}</span>
+                              </div>
                             </button>
-                          ))}
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    /* 16-Step Drum Grid */
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-zinc-300">16-Step Drum Sequencer</span>
+                          <div className="flex items-center gap-1">
+                            {["Rock", "HipHop", "Pop", "Dance"].map((preset) => (
+                              <button
+                                key={preset}
+                                onClick={() => handleApplyDrumPreset(preset)}
+                                className="px-2 py-0.5 rounded text-[11px] bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700"
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
                         </div>
+                        <span className="text-[11px] text-zinc-400 font-mono">16 Beats / Bar (4x4)</span>
                       </div>
 
-                      <span className="text-[11px] text-zinc-400 font-mono">16 Beats / Bar (4x4)</span>
-                    </div>
+                      <div className="overflow-x-auto pb-2">
+                        <div className="min-w-[600px] flex flex-col gap-1">
+                          {DRUM_NAMES.map((name, rowIdx) => {
+                            const pattern = selectedTrack.clips[0]?.drumPattern ?? DRUM_PRESETS["Rock"]!;
+                            return (
+                              <div key={name} className="flex items-center gap-1.5">
+                                <span className="w-24 text-[11px] font-medium text-zinc-400 truncate">{name}</span>
+                                <div className="flex-1 grid grid-cols-16 gap-1">
+                                  {Array.from({ length: 16 }).map((_, stepIdx) => {
+                                    const isActive = pattern[rowIdx]?.[stepIdx] ?? false;
+                                    const isCurrentStep = Math.floor(currentBeat * 4) % 16 === stepIdx && isPlaying;
+                                    const isBeatStart = stepIdx % 4 === 0;
 
-                    {/* 16-Step Sequencer Grid */}
-                    <div className="overflow-x-auto pb-2">
-                      <div className="min-w-[600px] flex flex-col gap-1">
-                        {DRUM_NAMES.map((name, rowIdx) => {
-                          const pattern = selectedTrack.clips[0]?.drumPattern ?? DRUM_PRESETS.Rock;
-                          return (
-                            <div key={name} className="flex items-center gap-1.5">
-                              <span className="w-24 text-[11px] font-medium text-zinc-400 truncate">{name}</span>
-                              <div className="flex-1 grid grid-cols-16 gap-1">
-                                {Array.from({ length: 16 }).map((_, stepIdx) => {
-                                  const isActive = pattern[rowIdx]?.[stepIdx] ?? false;
-                                  const isCurrentStep = Math.floor(currentBeat * 4) % 16 === stepIdx && isPlaying;
-                                  const isBeatStart = stepIdx % 4 === 0;
-
-                                  return (
-                                    <button
-                                      key={stepIdx}
-                                      onClick={() => handleToggleDrumStep(rowIdx, stepIdx)}
-                                      className={`h-7 rounded transition-all active:scale-95 border ${
-                                        isActive
-                                          ? "bg-amber-500 border-amber-400 shadow-sm"
-                                          : isBeatStart
-                                          ? "bg-zinc-800 border-zinc-700"
-                                          : "bg-zinc-900 border-zinc-800"
-                                      } ${isCurrentStep ? "ring-2 ring-cyan-400 brightness-125" : ""}`}
-                                    />
-                                  );
-                                })}
+                                    return (
+                                      <button
+                                        key={stepIdx}
+                                        onClick={() => handleToggleDrumStep(rowIdx, stepIdx)}
+                                        className={`h-7 rounded transition-all active:scale-95 border ${
+                                          isActive
+                                            ? "bg-amber-500 border-amber-400 shadow-sm"
+                                            : isBeatStart
+                                            ? "bg-zinc-800 border-zinc-700"
+                                            : "bg-zinc-900 border-zinc-800"
+                                        } ${isCurrentStep ? "ring-2 ring-cyan-400 brightness-125" : ""}`}
+                                      />
+                                    );
+                                  })}
+                                </div>
                               </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                ) : (
+                  /* ---------------------------------------------------- */
+                  /* VIEW B: GARAGEBAND SMART CHORDS OR PIANO KEYBOARD    */
+                  /* ---------------------------------------------------- */
+                  instrumentViewMode === "smart_chords" ? (
+                    /* GarageBand Interactive Smart Chord Strips */
+                    <div className="flex-1 flex flex-col justify-between py-1">
+                      <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 max-w-4xl mx-auto w-full h-44 select-none">
+                        {(GARAGEBAND_SMART_CHORDS["C Maj"] ?? []).map((ch) => {
+                          const isActive = activeChordName === ch.chordName;
+                          return (
+                            <div
+                              key={ch.chordName}
+                              className={`flex flex-col rounded-xl overflow-hidden border border-zinc-700/80 shadow-md transition-all ${
+                                isActive ? "ring-2 ring-emerald-400 shadow-emerald-500/20" : ""
+                              } bg-gradient-to-b from-[#262833] via-[#1c1d24] to-[#121317]`}
+                            >
+                              {/* Chord Header */}
+                              <div className="py-1 px-1.5 text-center bg-[#15161c] border-b border-zinc-700/50">
+                                <span className="text-sm font-extrabold text-zinc-100">{ch.chordName}</span>
+                              </div>
+
+                              {/* Upper Zone: Bass Root Note */}
+                              <button
+                                onClick={() => handleStrumChord(ch, "bass")}
+                                className="h-10 border-b border-zinc-800 hover:bg-emerald-600/20 active:bg-emerald-600/40 text-[10px] font-mono text-zinc-400 hover:text-emerald-300 flex flex-col items-center justify-center transition-colors"
+                                title="Root Bass Note"
+                              >
+                                <span>Bass</span>
+                                <span className="text-[9px] text-zinc-500">{ch.bassNotes[0]}</span>
+                              </button>
+
+                              {/* Middle Zone: Full Chord Strum / Piano Voicing */}
+                              <button
+                                onClick={() => handleStrumChord(ch, "strum")}
+                                className="flex-1 flex flex-col items-center justify-center hover:bg-emerald-500/20 active:bg-emerald-500/40 transition-colors relative group py-2"
+                                title="Tap to Strum Full Chord"
+                              >
+                                {/* Guitar String Stripes Graphics */}
+                                <div className="absolute inset-x-2 inset-y-1 flex justify-between pointer-events-none opacity-30 group-hover:opacity-60 transition-opacity">
+                                  <div className="w-px bg-zinc-400 h-full" />
+                                  <div className="w-px bg-zinc-400 h-full" />
+                                  <div className="w-px bg-zinc-400 h-full" />
+                                  <div className="w-px bg-zinc-400 h-full" />
+                                  <div className="w-px bg-zinc-400 h-full" />
+                                </div>
+                                <span className="text-xs font-bold text-emerald-400 group-hover:scale-105 transition-transform z-10">
+                                  STRUM
+                                </span>
+                              </button>
+
+                              {/* Lower Zone: Treble Triad */}
+                              <button
+                                onClick={() => handleStrumChord(ch, "treble")}
+                                className="h-8 border-t border-zinc-800 hover:bg-emerald-600/20 active:bg-emerald-600/40 text-[9px] font-mono text-zinc-400 hover:text-emerald-300 flex items-center justify-center transition-colors"
+                                title="Treble Triad Arpeggio"
+                              >
+                                Triad
+                              </button>
                             </div>
                           );
                         })}
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  /* Melodic Piano Keyboard & Chord Palette */
-                  <div className="h-full flex flex-col justify-between">
-                    {/* Keyboard Controls Bar */}
-                    <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
-                      <div className="flex items-center gap-2">
-                        {/* Octave Shifter */}
-                        <div className="flex items-center bg-[#15161b] px-2 py-1 rounded-md border border-zinc-800 gap-2">
+                  ) : (
+                    /* Piano Keyboard */
+                    <div className="h-full flex flex-col justify-between">
+                      <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center bg-[#15161b] px-2 py-1 rounded-md border border-zinc-800 gap-2">
+                            <button
+                              onClick={() => setCurrentOctave((o) => Math.max(1, o - 1))}
+                              className="text-xs font-bold px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200"
+                            >
+                              Oct -
+                            </button>
+                            <span className="text-xs font-mono font-bold text-emerald-400">Octave {currentOctave}</span>
+                            <button
+                              onClick={() => setCurrentOctave((o) => Math.min(7, o + 1))}
+                              className="text-xs font-bold px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200"
+                            >
+                              Oct +
+                            </button>
+                          </div>
+
                           <button
-                            onClick={() => setCurrentOctave((o) => Math.max(1, o - 1))}
-                            className="text-xs font-bold px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200"
+                            onClick={() => setShowNoteLabels(!showNoteLabels)}
+                            className={`px-2 py-1 text-xs rounded border transition-all ${
+                              showNoteLabels
+                                ? "bg-emerald-600/20 border-emerald-500/50 text-emerald-300"
+                                : "bg-zinc-800 border-zinc-700 text-zinc-400"
+                            }`}
                           >
-                            Oct -
-                          </button>
-                          <span className="text-xs font-mono font-bold text-emerald-400">Octave {currentOctave}</span>
-                          <button
-                            onClick={() => setCurrentOctave((o) => Math.min(7, o + 1))}
-                            className="text-xs font-bold px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200"
-                          >
-                            Oct +
+                            Labels
                           </button>
                         </div>
 
-                        {/* Labels toggle */}
-                        <button
-                          onClick={() => setShowNoteLabels(!showNoteLabels)}
-                          className={`px-2 py-1 text-xs rounded border transition-all ${
-                            showNoteLabels
-                              ? "bg-emerald-600/20 border-emerald-500/50 text-emerald-300"
-                              : "bg-zinc-800 border-zinc-700 text-zinc-400"
-                          }`}
-                        >
-                          Labels
-                        </button>
+                        <div className="hidden sm:flex items-center gap-1">
+                          <span className="text-[10px] text-zinc-500 font-mono mr-1">CHORDS:</span>
+                          {["C", "Dm", "Em", "F", "G", "Am"].map((ch) => (
+                            <button
+                              key={ch}
+                              onClick={() => {
+                                const notesMap: Record<string, string[]> = {
+                                  C: ["C4", "E4", "G4"],
+                                  Dm: ["D4", "F4", "A4"],
+                                  Em: ["E4", "G4", "B4"],
+                                  F: ["F4", "A4", "C5"],
+                                  G: ["G4", "B4", "D5"],
+                                  Am: ["A4", "C5", "E5"],
+                                };
+                                const notes = notesMap[ch] ?? [];
+                                notes.forEach((n) => handlePlayNote(n));
+                              }}
+                              className="px-2 py-0.5 text-xs font-bold rounded bg-zinc-800 hover:bg-emerald-600/30 hover:text-emerald-300 text-zinc-300 border border-zinc-700"
+                            >
+                              {ch}
+                            </button>
+                          ))}
+                        </div>
                       </div>
 
-                      {/* Instant Chords Shortcuts */}
-                      <div className="hidden sm:flex items-center gap-1">
-                        <span className="text-[10px] text-zinc-500 font-mono mr-1">CHORDS:</span>
-                        {["C", "Dm", "Em", "F", "G", "Am"].map((ch) => (
-                          <button
-                            key={ch}
-                            onClick={() => {
-                              const notesMap: Record<string, string[]> = {
-                                C: ["C4", "E4", "G4"],
-                                Dm: ["D4", "F4", "A4"],
-                                Em: ["E4", "G4", "B4"],
-                                F: ["F4", "A4", "C5"],
-                                G: ["G4", "B4", "D5"],
-                                Am: ["A4", "C5", "E5"],
-                              };
-                              const notes = notesMap[ch] ?? [];
-                              notes.forEach((n) => handlePlayNote(n));
-                            }}
-                            className="px-2 py-0.5 text-xs font-bold rounded bg-zinc-800 hover:bg-emerald-600/30 hover:text-emerald-300 text-zinc-300 border border-zinc-700"
-                          >
-                            {ch}
-                          </button>
-                        ))}
+                      {/* Interactive Piano Keys */}
+                      <div className="flex-1 flex justify-center items-end py-1 select-none overflow-x-auto">
+                        <div className="relative flex h-36 sm:h-44 bg-[#141519] p-1.5 rounded-lg border border-zinc-800 shadow-inner">
+                          {[
+                            "C", "D", "E", "F", "G", "A", "B",
+                            "C", "D", "E", "F", "G", "A", "B"
+                          ].map((noteName, idx) => {
+                            const oct = idx < 7 ? currentOctave : currentOctave + 1;
+                            const fullNote = `${noteName}${oct}`;
+                            const isPressed = activeNotes.has(fullNote);
+
+                            return (
+                              <button
+                                key={idx}
+                                onMouseDown={() => handlePlayNote(fullNote)}
+                                onTouchStart={(e) => {
+                                  e.preventDefault();
+                                  handlePlayNote(fullNote);
+                                }}
+                                className={`w-10 sm:w-12 h-full rounded-b-md flex flex-col justify-end items-center pb-2 transition-all border border-zinc-300/40 relative shadow-md ${
+                                  isPressed
+                                    ? "bg-emerald-300 translate-y-1 shadow-inner"
+                                    : "bg-gradient-to-b from-zinc-100 to-zinc-200 hover:from-white hover:to-zinc-100 text-zinc-800"
+                                }`}
+                              >
+                                {showNoteLabels && (
+                                  <span className="text-[10px] font-bold text-zinc-700 pointer-events-none">
+                                    {fullNote}
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+
+                          {[
+                            { note: "C#", left: 28, oct: currentOctave },
+                            { note: "D#", left: 68, oct: currentOctave },
+                            { note: "F#", left: 148, oct: currentOctave },
+                            { note: "G#", left: 188, oct: currentOctave },
+                            { note: "A#", left: 228, oct: currentOctave },
+                            { note: "C#", left: 308, oct: currentOctave + 1 },
+                            { note: "D#", left: 348, oct: currentOctave + 1 },
+                            { note: "F#", left: 428, oct: currentOctave + 1 },
+                            { note: "G#", left: 468, oct: currentOctave + 1 },
+                            { note: "A#", left: 508, oct: currentOctave + 1 },
+                          ].map((bKey, bIdx) => {
+                            const fullNote = `${bKey.note}${bKey.oct}`;
+                            const isPressed = activeNotes.has(fullNote);
+
+                            return (
+                              <button
+                                key={bIdx}
+                                style={{ left: `${bKey.left}px` }}
+                                onMouseDown={() => handlePlayNote(fullNote)}
+                                onTouchStart={(e) => {
+                                  e.preventDefault();
+                                  handlePlayNote(fullNote);
+                                }}
+                                className={`absolute top-1.5 w-6 sm:w-7 h-20 sm:h-26 rounded-b-sm z-10 border border-zinc-950 transition-all shadow-lg flex items-end justify-center pb-1 ${
+                                  isPressed
+                                    ? "bg-emerald-500 translate-y-1"
+                                    : "bg-gradient-to-b from-[#222329] to-[#0f1013] hover:from-zinc-800 hover:to-zinc-900"
+                                }`}
+                              >
+                                {showNoteLabels && (
+                                  <span className="text-[8px] font-bold text-zinc-300 pointer-events-none">
+                                    {bKey.note}
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
-
-                    {/* Interactive Real Piano Keyboard */}
-                    <div className="flex-1 flex justify-center items-end py-1 select-none overflow-x-auto">
-                      <div className="relative flex h-36 sm:h-44 bg-[#141519] p-1.5 rounded-lg border border-zinc-800 shadow-inner">
-                        {/* 2 Full Octaves White Keys */}
-                        {[
-                          "C", "D", "E", "F", "G", "A", "B",
-                          "C", "D", "E", "F", "G", "A", "B"
-                        ].map((noteName, idx) => {
-                          const oct = idx < 7 ? currentOctave : currentOctave + 1;
-                          const fullNote = `${noteName}${oct}`;
-                          const isPressed = activeNotes.has(fullNote);
-
-                          return (
-                            <button
-                              key={idx}
-                              onMouseDown={() => handlePlayNote(fullNote)}
-                              onTouchStart={(e) => {
-                                e.preventDefault();
-                                handlePlayNote(fullNote);
-                              }}
-                              className={`w-10 sm:w-12 h-full rounded-b-md flex flex-col justify-end items-center pb-2 transition-all border border-zinc-300/40 relative shadow-md ${
-                                isPressed
-                                  ? "bg-emerald-300 translate-y-1 shadow-inner"
-                                  : "bg-gradient-to-b from-zinc-100 to-zinc-200 hover:from-white hover:to-zinc-100 text-zinc-800"
-                              }`}
-                            >
-                              {showNoteLabels && (
-                                <span className="text-[10px] font-bold text-zinc-700 pointer-events-none">
-                                  {fullNote}
-                                </span>
-                              )}
-                            </button>
-                          );
-                        })}
-
-                        {/* Black Keys Positioned Above */}
-                        {[
-                          { note: "C#", left: 28, oct: currentOctave },
-                          { note: "D#", left: 68, oct: currentOctave },
-                          { note: "F#", left: 148, oct: currentOctave },
-                          { note: "G#", left: 188, oct: currentOctave },
-                          { note: "A#", left: 228, oct: currentOctave },
-                          { note: "C#", left: 308, oct: currentOctave + 1 },
-                          { note: "D#", left: 348, oct: currentOctave + 1 },
-                          { note: "F#", left: 428, oct: currentOctave + 1 },
-                          { note: "G#", left: 468, oct: currentOctave + 1 },
-                          { note: "A#", left: 508, oct: currentOctave + 1 },
-                        ].map((bKey, bIdx) => {
-                          const fullNote = `${bKey.note}${bKey.oct}`;
-                          const isPressed = activeNotes.has(fullNote);
-
-                          return (
-                            <button
-                              key={bIdx}
-                              style={{ left: `${bKey.left}px` }}
-                              onMouseDown={() => handlePlayNote(fullNote)}
-                              onTouchStart={(e) => {
-                                e.preventDefault();
-                                handlePlayNote(fullNote);
-                              }}
-                              className={`absolute top-1.5 w-6 sm:w-7 h-20 sm:h-26 rounded-b-sm z-10 border border-zinc-950 transition-all shadow-lg flex items-end justify-center pb-1 ${
-                                isPressed
-                                  ? "bg-emerald-500 translate-y-1"
-                                  : "bg-gradient-to-b from-[#222329] to-[#0f1013] hover:from-zinc-800 hover:to-zinc-900"
-                              }`}
-                            >
-                              {showNoteLabels && (
-                                <span className="text-[8px] font-bold text-zinc-300 pointer-events-none">
-                                  {bKey.note}
-                                </span>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
+                  )
                 )}
               </div>
             )}

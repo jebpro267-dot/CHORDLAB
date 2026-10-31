@@ -114,26 +114,26 @@ ChordLab includes a responsive musical welcome splash screen (`src/components/We
 
 ### Create Music Studio DAW (`/create`)
 
-A full Apple GarageBand-style multi-track Digital Audio Workstation (DAW) built directly into ChordLab:
+A full Apple GarageBand & BandLab style multi-track Digital Audio Workstation (DAW) built directly into ChordLab:
 - **GarageBand Arranger Interface**: Brushed titanium transport header with signature digital LCD display (Bar.Beat.Tick counter, BPM, Time signature, Key signature), Cycle/Loop region header, timeline measure ruler, draggable playhead needle, and colored multi-track audio waveform & MIDI piano roll lanes.
-- **14 Authentic Instruments with Acoustic Physical Modeling**:
-  1. *Grand Piano*: Steinway Concert Grand with felt hammer strike attack, triple-string inharmonic unison, and wooden soundboard resonance.
-  2. *Rhodes E-Piano*: 1970s vintage Mark I tine piano with 2-operator FM bell chime attack and warm stereo chorus.
-  3. *Ac Guitar*: Martin steel-string acoustic guitar with Karplus-Strong string waveguide modeling and acoustic body cavity filters.
-  4. *Clean Strat*: Single-coil electric guitar with tube amp warmth and pickup tone shaping.
-  5. *Guitar Solo*: Overdriven singing lead guitar with non-linear waveshaping distortion and 4x12 Marshall speaker cabinet simulation.
-  6. *Modern Bass*: Fender Jazz Bass with deep sub-bass fundamental and 24dB resonant low-pass ladder filter.
-  7. *String Section*: Philharmonic violin/cello ensemble with natural vibrato LFO and wooden violin body formants.
-  8. *Classic Rock Organ*: Hammond B3 drawbar organ with rotating Leslie speaker tremolo/chorus simulation.
-  9. *Concert Flute*: Pure acoustic fundamental mixed with breath flutter turbulence noise and woody resonance.
-  10. *Brass Horns*: Fanfare trumpet and French horn brass section with bright swept filter bite.
-  11. *Analog Synth*: Detuned multi-saw analog synthesizer lead with resonant 4-pole low-pass filter.
-  12. *Studio Drum Kit*: Acoustic studio drum kit featuring punchy kick (145Hz->42Hz pitch drop + beater transient), dual-component snare, inharmonic metallic hi-hats, toms, and shimmering crash cymbal.
-  13. *Percussion*: Hand claps with multi-burst stochastic timing, tambourine, and shakers.
-  14. *My Vocal*: Studio vocal recording track with live monitoring and real waveform visualization.
-- **3 Input Workflows for Every Instrument & Vocal Track**:
-  - **Option 1: Create using Instrument**: Interactive on-screen touch/mouse/keyboard piano with octave shifter, chord shortcuts, and 16-step drum pattern sequencer with Rock, Hip-Hop, Pop, and Dance presets.
-  - **Option 2: Record via Line-In / Device Microphone**: Direct recording input with real-time VU peak level meter, headphone direct monitoring, pre-amp input gain, and 1-bar count-in metronome.
+- **High-Fidelity Real Instrument Soundfonts Engine (`src/lib/real-instruments.ts`)**:
+  - Downloads, decodes, and caches real recorded 88-key studio soundfonts from FluidR3_GM (Steinway Grand Piano, Martin Steel Acoustic Guitar, Fender Jazz Bass, Electric Lead Guitar, and Strings).
+  - High-precision nearest-sample pitch shifting with natural ADSR envelopes.
+  - Instant background preloading on DAW mount so starter tracks play immediately with authentic acoustic tones rather than basic synthesizer waveforms.
+- **GarageBand Smart Chord Strips**:
+  - 8 Smart Chord strips in key of C Major (C, Dm, Em, F, G, Am, Bdim).
+  - Multi-zone touch strips: Root Bass (Bass 1), 5th Bass (Bass 2), 6-string authentic guitar/piano full strum with realistic humanized 12-18ms finger strum stagger, and upper treble zone.
+  - Real-time MIDI recording: automatically captures strums and bass notes directly into the selected track's timeline clip.
+- **BandLab 8-Pad MPC Touch Drum Machine**:
+  - 8 tactile MPC velocity pads with distinct color gradients, hotkey bindings (1, 2, 3, 4, Q, W, E, R), and haptic flash feedback.
+  - Pre-synthesized 24-bit stereo studio drum kit buffers: Acoustic Sub Punch Kick, Wooden Studio Snare, Crisp 14" Closed Hi-Hat, Sizzling Open Hi-Hat, Room Handclap, Tuned Shell Tom, Shimmering 18" Crash Cymbal, and Studio Tambourine/Shaker.
+- **Enhanced Continuous Timeline Playback & Looping**:
+  - 16-step drum sequencer patterns automatically repeat across the full duration of multi-bar clips (bars 1-4+).
+  - Seamless cycle looping with zero-gap audio re-scheduling when the playhead wraps.
+  - Stereo LED VU meters on track headers indicating active playback levels.
+- **3 Input Workflows for Every Track**:
+  - **Option 1: Play & Strum**: Interactive piano keyboard, GarageBand Smart Chords, BandLab MPC pads, and 16-step drum grid with Rock, Hip-Hop, Pop, and Dance presets.
+  - **Option 2: Record via Line-In / Device Microphone**: Direct recording input with real-time VU peak level meter, headphone direct monitoring, pre-amp input gain, and count-in metronome.
   - **Option 3: Upload Audio File**: Direct drag & drop or file import (.wav, .mp3, .m4a, .flac, .ogg) with instant Web Audio decoding and timeline waveform synchronization.
 - **Master Bounce & Integration**: OfflineAudioContext multi-track rendering to master 16-bit stereo PCM WAV for local download or direct one-tap save into the ChordLab song library for chord analysis.
 
