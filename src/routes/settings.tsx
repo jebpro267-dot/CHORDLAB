@@ -290,6 +290,14 @@ export function SettingsPage() {
               <div className="mt-1.5 grid grid-cols-2 gap-2">
                 <button
                   type="button"
+                  onClick={() => handlePresetSelect("https://chordlab-backend-7myv.onrender.com")}
+                  className="flex flex-col items-start rounded-xl border border-primary/40 bg-primary/10 p-2.5 text-left transition hover:border-primary"
+                >
+                  <span className="text-xs font-semibold text-primary">Render Cloud (24/7)</span>
+                  <span className="font-mono text-[10px] text-muted-foreground">chordlab-backend-7myv...</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => handlePresetSelect("http://192.168.0.111:8000")}
                   className="flex flex-col items-start rounded-xl border border-white/10 bg-background/50 p-2.5 text-left transition hover:border-primary/50"
                 >

@@ -9,7 +9,7 @@ export function getBackendBaseUrl(): string {
   } catch {
     // ignore
   }
-  return (import.meta.env["VITE_BACKEND_URL"] || "").replace(/\/+$/, "");
+  return (import.meta.env["VITE_BACKEND_URL"] || "https://chordlab-backend-7myv.onrender.com").replace(/\/+$/, "");
 }
 
 /**
