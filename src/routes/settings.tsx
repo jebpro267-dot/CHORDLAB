@@ -274,7 +274,7 @@ export function SettingsPage() {
                 <Input
                   value={serverUrl}
                   onChange={(e) => setServerUrl(e.target.value)}
-                  placeholder="e.g. http://192.168.0.111:8000"
+                  placeholder="https://chordlab-backend-7myv.onrender.com"
                   className="font-mono text-xs"
                 />
                 <Button size="sm" onClick={handleSaveServer} className="gap-1.5">

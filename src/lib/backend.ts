@@ -2,14 +2,28 @@
  * Returns the currently active backend base URL.
  * Checks localStorage for user-specified server override, falling back to VITE_BACKEND_URL.
  */
+export const PERMANENT_BACKEND_URL = "https://chordlab-backend-7myv.onrender.com";
+
+/**
+ * Returns the currently active backend base URL.
+ * Defaults permanently to the 24/7 cloud server (Render) so users never need to configure it manually.
+ */
 export function getBackendBaseUrl(): string {
   try {
     const custom = localStorage.getItem("chordlab_backend_url");
-    if (custom && custom.trim()) return custom.trim().replace(/\/+$/, "");
+    if (
+      custom &&
+      custom.trim() &&
+      !custom.includes("localhost") &&
+      !custom.includes("127.0.0.1") &&
+      !custom.includes("192.168.")
+    ) {
+      return custom.trim().replace(/\/+$/, "");
+    }
   } catch {
     // ignore
   }
-  return (import.meta.env["VITE_BACKEND_URL"] || "https://chordlab-backend-7myv.onrender.com").replace(/\/+$/, "");
+  return (import.meta.env["VITE_BACKEND_URL"] || PERMANENT_BACKEND_URL).replace(/\/+$/, "");
 }
 
 /**
