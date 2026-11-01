@@ -118,7 +118,7 @@ function RootComponent() {
       <AuthProvider>
         <AppSettingsProvider>
           <AppFrame />
-          <Toaster position="top-center" richColors />
+          <Toaster position="top-center" richColors offset="max(env(safe-area-inset-top, 0px), 36px)" />
         </AppSettingsProvider>
       </AuthProvider>
     </QueryClientProvider>
@@ -177,7 +177,7 @@ function AppFrame() {
       {auth.ready && auth.account ? (
         <>
           {/* Top Application Bar with Brand and Top-Right Sign Out Button */}
-          <header className="sticky top-0 z-40 flex items-center justify-between border-b border-white/5 bg-background/85 px-4 py-2.5 backdrop-blur-xl">
+          <header className="sticky top-0 z-40 flex items-center justify-between border-b border-white/5 bg-background/85 px-4 pt-[max(0.625rem,env(safe-area-inset-top,0px))] pb-2.5 backdrop-blur-xl">
             <Link to="/" className="flex items-center gap-2 transition hover:opacity-85">
               <div className="flex size-7 items-center justify-center rounded-lg bg-primary/20 text-primary shadow-sm shadow-primary/20">
                 <Music2 className="size-4" strokeWidth={2.5} />

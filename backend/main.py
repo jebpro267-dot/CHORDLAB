@@ -1146,8 +1146,18 @@ AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _download_url_audio(url: str) -> dict:
-    import imageio_ffmpeg
-    import yt_dlp
+    import shutil
+    try:
+        import yt_dlp
+    except ImportError as e:
+        raise RuntimeError("yt-dlp is not installed on the server; please check requirements.txt") from e
+
+    ffmpeg_exe = shutil.which("ffmpeg") or "ffmpeg"
+    try:
+        import imageio_ffmpeg
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
 
     url_str = str(url).strip()
     host = (urlsplit(url_str).hostname or "").removeprefix("www.").lower()
@@ -1191,7 +1201,6 @@ def _download_url_audio(url: str) -> dict:
 
     file_id = secrets.token_hex(12)
     output_template = str(AUDIO_CACHE_DIR / f"{file_id}.%(ext)s")
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
     ydl_opts = {
         "format": "bestaudio/best",
@@ -1335,6 +1344,76 @@ def _estimate_key_and_beats(audio_bytes: bytes, chords: list[dict], duration_hin
     }
 
 
+
+def _extract_chords_chroma(audio_bytes: bytes, duration: float) -> list[dict]:
+    import io
+    import numpy as np
+    import librosa
+
+    try:
+        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=22050, mono=True)
+    except Exception:
+        return [{"start": 0.0, "end": duration, "label": "C", "confidence": 0.8}]
+
+    hop_length = 2048
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=hop_length).T
+    PITCHES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+
+    templates = []
+    labels = []
+    for r in range(12):
+        maj = np.zeros(12)
+        maj[r] = 1.0; maj[(r+4)%12] = 0.8; maj[(r+7)%12] = 0.8
+        templates.append(maj / (np.linalg.norm(maj) or 1.0))
+        labels.append(PITCHES[r])
+
+        min_t = np.zeros(12)
+        min_t[r] = 1.0; min_t[(r+3)%12] = 0.8; min_t[(r+7)%12] = 0.8
+        templates.append(min_t / (np.linalg.norm(min_t) or 1.0))
+        labels.append(PITCHES[r] + "m")
+
+    templates = np.array(templates)
+    norms = np.linalg.norm(chroma, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    norm_chroma = chroma / norms
+
+    sim = np.dot(norm_chroma, templates.T)
+    preds = np.argmax(sim, axis=1)
+
+    frame_dur = hop_length / sr
+    events = []
+    if len(preds) == 0:
+        return [{"start": 0.0, "end": duration, "label": "C", "confidence": 0.8}]
+
+    cur_label = labels[preds[0]]
+    cur_start = 0.0
+    cur_sims = [float(sim[0, preds[0]])]
+
+    for i in range(1, len(preds)):
+        lbl = labels[preds[i]]
+        if lbl != cur_label:
+            t = round(i * frame_dur, 2)
+            events.append({
+                "start": cur_start,
+                "end": t,
+                "label": cur_label,
+                "confidence": round(float(np.mean(cur_sims)), 2),
+            })
+            cur_label = lbl
+            cur_start = t
+            cur_sims = [float(sim[i, preds[i]])]
+        else:
+            cur_sims.append(float(sim[i, preds[i]]))
+
+    events.append({
+        "start": cur_start,
+        "end": round(len(preds) * frame_dur, 2),
+        "label": cur_label,
+        "confidence": round(float(np.mean(cur_sims)), 2),
+    })
+    return events
+
+
 class AnalyzeLinkRequest(BaseModel):
     url: str
     language: str = "auto"
@@ -1361,10 +1440,17 @@ async def analyze_link_endpoint(data: AnalyzeLinkRequest) -> dict:
     audio_bytes = file_path.read_bytes()
     duration = float(import_info.get("duration") or 180.0)
 
-    # 2. Directly analyze full chords across the entire song using local TensorFlow model
-    from backend.chord_model import analyze_audio
-    chord_res = await run_in_threadpool(analyze_audio, audio_bytes, data.language)
-    chords = chord_res.get("chords", [])
+    # 2. Directly analyze full chords across the entire song using TensorFlow model (with chroma template fallback)
+    chords = []
+    lang_used = "english"
+    try:
+        from backend.chord_model import analyze_audio
+        chord_res = await run_in_threadpool(analyze_audio, audio_bytes, data.language)
+        chords = chord_res.get("chords", [])
+        lang_used = chord_res.get("language", "english")
+    except Exception as tf_err:
+        print("TensorFlow analysis error, falling back to chroma template extraction:", tf_err)
+        chords = await run_in_threadpool(_extract_chords_chroma, audio_bytes, duration)
 
     # 3. Estimate key, tempo, beats
     metrics = await run_in_threadpool(_estimate_key_and_beats, audio_bytes, chords, duration)
@@ -1410,7 +1496,7 @@ async def analyze_link_endpoint(data: AnalyzeLinkRequest) -> dict:
             "timeSignature": metrics["timeSignature"],
             "chords": chords,
             "beatChords": metrics["beatChords"],
-            "language": chord_res.get("language", "english"),
+            "language": lang_used,
         },
     }
 
