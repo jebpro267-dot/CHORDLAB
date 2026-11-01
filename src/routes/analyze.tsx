@@ -199,6 +199,7 @@ function AnalyzePage() {
     setFile(f);
     const inferred = f.name.replace(/\.[^.]+$/, "");
     if (!title) setTitle(inferred);
+    toast.success(`Selected "${f.name}" — tap Detect chords below`);
     setTimeout(() => {
       void grabLyrics(true, inferred);
     }, 200);
@@ -660,18 +661,18 @@ function AnalyzePage() {
       </div>
 
       <div className="panel mt-4 p-4">
-        <input
-          ref={fileRef}
-          type="file"
-          accept="audio/*"
-          className="hidden"
-          onChange={(e) => onPick(e.target.files?.[0] ?? null)}
-        />
-        <button
-          type="button"
-          onClick={() => fileRef.current?.click()}
-          className="flex w-full flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-surface-2/40 px-4 py-8 text-center transition-colors hover:border-primary/60"
+        <label
+          htmlFor="audio-file-input"
+          className="relative flex w-full cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-surface-2/40 px-4 py-8 text-center transition-colors hover:border-primary/60 active:bg-surface-2/70"
         >
+          <input
+            id="audio-file-input"
+            ref={fileRef}
+            type="file"
+            accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.weba,.webm,audio/mpeg,audio/wav,audio/x-m4a,audio/flac,audio/ogg,*/*"
+            className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+            onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+          />
           {file ? (
             <>
               <Music4 className="size-7 text-primary" />
@@ -685,7 +686,7 @@ function AnalyzePage() {
               <span className="text-xs text-muted-foreground">MP3, WAV, M4A, FLAC, OGG</span>
             </>
           )}
-        </button>
+        </label>
 
         <div className="mt-4 grid grid-cols-2 gap-3">
           <div className="space-y-1.5">

@@ -850,14 +850,17 @@ async def chord_model(
     if len(audio) > MAX_ANALYSIS_BYTES:
         raise HTTPException(413, "Audio file is larger than 20 MB")
 
-    from backend.chord_model import analyze_audio
-
+    analysis = None
     try:
+        from backend.chord_model import analyze_audio
         analysis = await run_in_threadpool(analyze_audio, audio, language)
-    except ValueError as error:
-        raise HTTPException(400, str(error)) from error
-    except RuntimeError as error:
-        raise HTTPException(503, str(error)) from error
+    except Exception as error:
+        print("TensorFlow analysis error, falling back to chroma template extraction:", error)
+        try:
+            chords = await run_in_threadpool(_extract_chords_chroma, audio, 180.0)
+            analysis = {"chords": chords, "language": "english"}
+        except Exception as fallback_err:
+            raise HTTPException(503, f"Could not analyze audio: {error}") from fallback_err
     resolved_lang = analysis.get("language", language)
     return {
         "ok": True,
@@ -1209,6 +1212,11 @@ def _download_url_audio(url: str) -> dict:
         "noplaylist": True,
         "nocheckcertificate": True,
         "geo_bypass": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios"],
+            }
+        },
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",

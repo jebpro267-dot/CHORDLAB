@@ -4,10 +4,10 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.webkit.PermissionRequest;
-import android.webkit.WebChromeClient;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.BridgeWebChromeClient;
 
 public class MainActivity extends BridgeActivity {
     private static final int PERMISSION_REQUEST_CODE = 1001;
@@ -29,9 +29,9 @@ public class MainActivity extends BridgeActivity {
             );
         }
 
-        // Configure WebView to grant WebRTC audio capture permissions requested by web app
+        // Configure WebView using BridgeWebChromeClient subclass so file choosing (onShowFileChooser) AND WebRTC both work
         if (this.bridge != null && this.bridge.getWebView() != null) {
-            this.bridge.getWebView().setWebChromeClient(new WebChromeClient() {
+            this.bridge.getWebView().setWebChromeClient(new BridgeWebChromeClient(this.bridge) {
                 @Override
                 public void onPermissionRequest(final PermissionRequest request) {
                     runOnUiThread(() -> {
@@ -42,3 +42,4 @@ public class MainActivity extends BridgeActivity {
         }
     }
 }
+

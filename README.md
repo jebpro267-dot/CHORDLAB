@@ -343,6 +343,7 @@ cd android
 ```
 
 - **Edge-to-Edge & System Bar Handling**: The native Android theme (`styles.xml`) enforces `android:fitsSystemWindows="true"` and matches `android:statusBarColor` and `android:navigationBarColor` to `#1b1e26`. The React layout in `src/routes/__root.tsx` applies `env(safe-area-inset-top)` to the header and toast notifications so the system clock, battery icons, and camera notches never overlap application content.
+- **Native Android File Chooser & Media Permissions**: `MainActivity.java` extends Capacitor's `BridgeWebChromeClient` so Android system file chooser intents (`onShowFileChooser`) and WebRTC microphone capture (`RECORD_AUDIO`) operate simultaneously. `AndroidManifest.xml` grants `READ_MEDIA_AUDIO` and `READ_EXTERNAL_STORAGE` to guarantee file picking across Android 10-14.
 
 ### 4. Dynamic Server URL Configuration & Mobile Connectivity
 
@@ -350,5 +351,5 @@ The mobile client and web applications support runtime server URL switching with
 - **Default Cloud Backend**: The application defaults out-of-the-box to the permanent cloud API endpoint (`https://chordlab-backend-7myv.onrender.com`), requiring no manual configuration by end users.
 - **In-App Server Switcher**: On the sign-in screen, users can tap `Server: (Change)` to inspect the active backend, test server reachability (`/health`), and switch endpoints on the fly (e.g. to a live Cloudflare Tunnel `*.trycloudflare.com` or a local Wi-Fi IP `http://192.168.x.x:8000`).
 - **Resilient Offline / Network Detection**: Connection errors provide direct guidance and one-tap access to server settings rather than generic network failure messages.
-- **Audio Extraction & Analysis Fallback**: The backend includes `imageio-ffmpeg` and `yt-dlp` in `backend/requirements.txt` with robust ffmpeg path resolution, plus a lightweight Librosa chroma-STFT fallback in `/api/analyze-link` to ensure chord recognition succeeds even in memory-constrained cloud environments.
+- **Audio Extraction & Analysis Fallback**: The backend includes `imageio-ffmpeg` and `yt-dlp` in `backend/requirements.txt` configured with mobile client player extractors (`player_client: ['android', 'ios']`) to bypass datacenter bot challenges, along with lightweight Librosa chroma-STFT fallback in `/api/analyze-link` and `/api/chord-model` to ensure chord recognition succeeds even under cloud memory constraints.
 
