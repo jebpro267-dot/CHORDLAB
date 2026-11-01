@@ -26,6 +26,7 @@ import { downloadSheetImage, downloadSheetPdf, downloadText } from "@/lib/export
 import { useInstrument } from "@/lib/prefs";
 import { buildSheet, sheetToText, uniqueChords } from "@/lib/sheet";
 import { deleteSong, getSong, saveSong, type Song } from "@/lib/storage";
+import { backendUrl } from "@/lib/backend";
 
 
 export const Route = createFileRoute("/song/$id")({
@@ -77,12 +78,14 @@ function SongPage() {
       if (blob) {
         url = URL.createObjectURL(blob);
         setAudioUrl(url);
+      } else if (song?.audioUrl) {
+        setAudioUrl(backendUrl(song.audioUrl));
       }
     });
     return () => {
       if (url) URL.revokeObjectURL(url);
     };
-  }, [id]);
+  }, [id, song?.audioUrl]);
 
   useEffect(() => {
     if (!scrollSpeed) return;

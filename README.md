@@ -21,8 +21,10 @@ is separate and required on each fresh console page load.
 ## How It Works
 
 1. Import an audio file, record audio from the microphone, or paste a YouTube /
-	Spotify link. Link tracks are automatically downloaded in full through the
-	backend `yt-dlp` pipeline for complete chord analysis, stem separation, and playback.
+	Spotify link. When a song link is provided, `/api/analyze-link` automatically downloads
+	the full track through `yt-dlp`, runs complete TensorFlow chord recognition, extracts
+	key and tempo, and syncs LRCLIB / Gemini lyrics directly across the entire song without
+	requiring microphone snippets or partial recording.
 2. ChordLab detects chords using the locally hosted multi-lingual TensorFlow models,
 	ChordMini, or client-side Web Audio analysis with specialized cadential profiles
 	for English, Hindi, and Tamil.

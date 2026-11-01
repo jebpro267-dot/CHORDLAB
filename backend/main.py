@@ -1250,6 +1250,171 @@ def _download_url_audio(url: str) -> dict:
     }
 
 
+def _estimate_key_and_beats(audio_bytes: bytes, chords: list[dict], duration_hint: float = 180.0):
+    import numpy as np
+
+    PITCH_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+    MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+    MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+
+    # 1. Estimate Key
+    chroma = np.zeros(12)
+    for c in chords:
+        lbl = c.get("label", "")
+        if not lbl or lbl in ("N", "X"):
+            continue
+        dur = max(0.1, float(c.get("end", 0)) - float(c.get("start", 0)))
+        m = re.match(r"^([A-Ga-g][b#]?)(.*)$", lbl)
+        if not m:
+            continue
+        r_name = m.group(1).capitalize()
+        enh = {"C#": "Db", "D#": "Eb", "F#": "Gb", "G#": "Ab", "A#": "Bb"}
+        r_name = enh.get(r_name, r_name)
+        if r_name not in PITCH_NAMES:
+            continue
+        r_pc = PITCH_NAMES.index(r_name)
+        q = m.group(2).lower()
+        is_min = "m" in q and "maj" not in q
+        third = (r_pc + 3 if is_min else r_pc + 4) % 12
+        fifth = (r_pc + 7) % 12
+        chroma[r_pc] += dur * 1.6
+        chroma[third] += dur
+        chroma[fifth] += dur
+
+    norm = chroma / (np.sum(chroma) or 1.0)
+    best_key = "C"
+    best_pc = 0
+    best_mode = "major"
+    best_score = -1e9
+    for shift in range(12):
+        maj_sc = float(np.dot(np.roll(norm, -shift), MAJOR_PROFILE))
+        min_sc = float(np.dot(np.roll(norm, -shift), MINOR_PROFILE))
+        if maj_sc > best_score:
+            best_score = maj_sc
+            best_pc = shift
+            best_key = PITCH_NAMES[shift]
+            best_mode = "major"
+        if min_sc > best_score:
+            best_score = min_sc
+            best_pc = shift
+            best_key = PITCH_NAMES[shift] + "m"
+            best_mode = "minor"
+
+    # 2. Extract Beats & Tempo using librosa
+    try:
+        import io
+        import librosa
+        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=22050, mono=True)
+        tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+        bpm = round(float(np.atleast_1d(tempo)[0]))
+        beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
+        beats = [round(float(b), 3) for b in beat_times]
+    except Exception:
+        bpm = 120
+        step = 60.0 / bpm
+        beats = [round(t, 3) for t in np.arange(0, duration_hint, step).tolist()]
+
+    # 3. Align beatChords
+    beat_chords = []
+    for b in beats:
+        hit = "N"
+        for c in chords:
+            if b >= c.get("start", 0) and b < c.get("end", 0):
+                hit = c.get("label", "N")
+                break
+        beat_chords.append(hit)
+
+    return {
+        "bpm": bpm,
+        "beats": beats,
+        "key": best_key,
+        "keyPc": best_pc,
+        "mode": best_mode,
+        "timeSignature": 4,
+        "beatChords": beat_chords,
+    }
+
+
+class AnalyzeLinkRequest(BaseModel):
+    url: str
+    language: str = "auto"
+
+
+@app.post("/api/analyze-link")
+async def analyze_link_endpoint(data: AnalyzeLinkRequest) -> dict:
+    require_feature("link_import")
+    raw_url = str(data.url).strip()
+    if not raw_url:
+        raise HTTPException(400, "URL cannot be empty")
+
+    # 1. Download the full audio track
+    try:
+        import_info = await run_in_threadpool(_download_url_audio, raw_url)
+    except Exception as error:
+        raise HTTPException(502, f"Could not download audio from link: {error}") from error
+
+    filename = import_info["filename"]
+    file_path = (AUDIO_CACHE_DIR / filename).resolve()
+    if not file_path.is_file():
+        raise HTTPException(500, "Downloaded audio file not found on disk")
+
+    audio_bytes = file_path.read_bytes()
+    duration = float(import_info.get("duration") or 180.0)
+
+    # 2. Directly analyze full chords across the entire song using local TensorFlow model
+    from backend.chord_model import analyze_audio
+    chord_res = await run_in_threadpool(analyze_audio, audio_bytes, data.language)
+    chords = chord_res.get("chords", [])
+
+    # 3. Estimate key, tempo, beats
+    metrics = await run_in_threadpool(_estimate_key_and_beats, audio_bytes, chords, duration)
+
+    # 4. Generate/fetch synchronized lyrics (LRCLIB database first, then AI fallback)
+    lyrics_data = {"plain": "", "synced": []}
+    try:
+        t_title = import_info.get("title", "").strip() or "Audio Track"
+        t_artist = (import_info.get("artist") or "").strip() or None
+        lyrics_lookup_req = LyricsLookup(
+            title=t_title,
+            artist=t_artist,
+            duration=duration,
+        )
+        lyrics_data = await asyncio.wait_for(fetch_lyrics(lyrics_lookup_req), timeout=5.0)
+    except Exception as lyric_err:
+        print("Lyric fetch/gen error or timeout (using instant fallback):", lyric_err)
+        try:
+            lyrics_data = _generate_lyrics_ai(
+                import_info.get("title", ""),
+                import_info.get("artist", ""),
+                duration,
+            )
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "id": import_info["fileId"],
+        "title": import_info.get("title", "Audio Track"),
+        "artist": import_info.get("artist", ""),
+        "artwork": import_info.get("thumbnail", ""),
+        "audioUrl": import_info["audioUrl"],
+        "lyrics": lyrics_data.get("plain", ""),
+        "syncedLyrics": lyrics_data.get("synced", []),
+        "analysis": {
+            "duration": duration,
+            "bpm": metrics["bpm"],
+            "beats": metrics["beats"],
+            "key": metrics["key"],
+            "keyPc": metrics["keyPc"],
+            "mode": metrics["mode"],
+            "timeSignature": metrics["timeSignature"],
+            "chords": chords,
+            "beatChords": metrics["beatChords"],
+            "language": chord_res.get("language", "english"),
+        },
+    }
+
+
 @app.post("/api/download-audio")
 async def download_audio_endpoint(data: LinkImport) -> dict:
     require_feature("link_import")
@@ -1306,7 +1471,7 @@ Rules:
             from google import genai
             client = genai.Client()
             response = client.models.generate_content(
-                model="gemini-3.8-flash",
+                model="gemini-2.5-flash",
                 contents=prompt,
             )
             text = response.text or ""
@@ -1560,7 +1725,7 @@ async def romanize(data: RomanizeRequest) -> dict[str, str]:
             from google import genai
             client = genai.Client()
             resp = client.models.generate_content(
-                model="gemini-3.8-flash",
+                model="gemini-2.5-flash",
                 contents=f"{system}\n\nLyrics to convert:\n{data.lyrics}",
             )
             if resp.text and resp.text.strip():
@@ -1654,4 +1819,4 @@ if __name__ == "__main__":
 
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("backend.main:app", host=host, port=port, reload=False)
+    uvicorn.run("backend.main:app", host=host, port=port, reload=False)

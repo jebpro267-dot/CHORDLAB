@@ -50,6 +50,81 @@ export const Route = createFileRoute("/analyze")({
 type Style = "auto" | "hinglish" | "tanglish" | "english";
 type AnalysisEngine = "tensorflow" | "chordmini-auto" | "madmom" | "beat-transformer" | "local";
 
+
+async function readFileAsArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
+  if (typeof blob.arrayBuffer === "function") {
+    try {
+      return await blob.arrayBuffer();
+    } catch {
+      // fallback to FileReader
+    }
+  }
+  return new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+    reader.onerror = () => reject(reader.error || new Error("Failed to read audio file"));
+    reader.readAsArrayBuffer(blob);
+  });
+}
+
+async function safeDecodeAudio(
+  arrayBuffer: ArrayBuffer,
+): Promise<{ duration: number; buffer: AudioBuffer | null }> {
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) {
+    return { duration: 180, buffer: null };
+  }
+  let ctx: AudioContext | null = null;
+  try {
+    ctx = new AudioCtx();
+    const copy = arrayBuffer.slice(0);
+    const buffer = await new Promise<AudioBuffer>((resolve, reject) => {
+      let resolved = false;
+      const promise = ctx!.decodeAudioData(
+        copy,
+        (decoded) => {
+          if (!resolved) {
+            resolved = true;
+            resolve(decoded);
+          }
+        },
+        (err) => {
+          if (!resolved) {
+            resolved = true;
+            reject(err);
+          }
+        },
+      );
+      if (promise && typeof promise.then === "function") {
+        promise.then(
+          (decoded) => {
+            if (!resolved) {
+              resolved = true;
+              resolve(decoded);
+            }
+          },
+          (err) => {
+            if (!resolved) {
+              resolved = true;
+              reject(err);
+            }
+          },
+        );
+      }
+    });
+    return { duration: buffer.duration || 180, buffer };
+  } catch (err) {
+    console.warn("safeDecodeAudio fallback:", err);
+    return { duration: 180, buffer: null };
+  } finally {
+    if (ctx && ctx.state !== "closed") {
+      void ctx.close().catch(() => {});
+    }
+  }
+}
+
 function AnalyzePage() {
   const { settings } = useAppSettings();
   const navigate = useNavigate();
@@ -137,57 +212,99 @@ function AnalyzePage() {
     }
     setImporting(true);
     setBusy(true);
-    setProgress(8);
-    setStage("Downloading full track from link");
+    setProgress(15);
+    setStage("Connecting to server & analyzing full song from link...");
     try {
-      toast.info("Downloading full song audio from link...");
+      toast.info("Downloading track, syncing lyrics, and analyzing entire song with TensorFlow...");
       const res = await backendJson<{
-        fileId: string;
-        filename: string;
+        ok: boolean;
+        id: string;
         title: string;
         artist: string;
-        thumbnail: string;
-        duration: number;
+        artwork: string;
         audioUrl: string;
-      }>("/api/download-audio", {
+        lyrics: string;
+        syncedLyrics: SyncedLine[];
+        analysis: AnalysisResult;
+      }>("/api/analyze-link", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: rawLink }),
+        body: JSON.stringify({ url: rawLink, language: acrLanguage }),
       });
+
+      if (!res.ok || !res.analysis) {
+        throw new Error("Server failed to analyze the song link.");
+      }
 
       const cleanTitle = res.title || "Audio Track";
       const cleanArtist = res.artist || "";
-      const cleanArtwork = res.thumbnail || "";
+      const cleanArtwork = res.artwork || "";
 
       setTitle(cleanTitle);
       if (cleanArtist) setArtist(cleanArtist);
       if (cleanArtwork) setArtwork(cleanArtwork);
+      if (res.lyrics) setLyrics(res.lyrics);
+      if (res.syncedLyrics) setSynced(res.syncedLyrics);
 
-      setProgress(25);
-      setStage("Retrieving full audio stream");
-      const audioRes = await backendFetch(res.audioUrl);
-      if (!audioRes.ok) throw new Error("Could not retrieve downloaded audio file");
-      const blob = await audioRes.blob();
-      const downloadedFile = new File([blob], res.filename || "track.mp3", { type: "audio/mpeg" });
-      setFile(downloadedFile);
+      setProgress(75);
+      setStage("Caching audio and syncing lyrics...");
 
-      toast.success(`Full song downloaded! Fetching lyrics and detecting chords across entire track...`);
-      setProgress(35);
+      // Download audio blob in background to cache in IndexedDB
+      try {
+        const audioRes = await backendFetch(res.audioUrl);
+        if (audioRes.ok) {
+          const blob = await audioRes.blob();
+          await putAudio(res.id, blob);
+        }
+      } catch (cacheErr) {
+        console.warn("Could not cache audio locally:", cacheErr);
+      }
 
-      // Fetch or generate beat-synced lyrics
-      const syncedResult = await grabLyrics(true, cleanTitle, cleanArtist, res.duration);
+      // Transliteration if selected
+      let romanized = "";
+      if (res.lyrics && res.lyrics.trim() && style !== "english" && settings.features.lyric_romanization) {
+        setStage("Transliterating lyrics");
+        setProgress(90);
+        try {
+          const r = await romanizeLyrics({ data: { lyrics: res.lyrics, style } });
+          romanized = r.text;
+        } catch {
+          // ignore
+        }
+      }
 
-      // Run full audio analysis across the entire song
-      await run(downloadedFile, cleanTitle, cleanArtist, cleanArtwork, syncedResult);
+      setStage("Saving chord sheet");
+      setProgress(98);
+      saveSong({
+        id: res.id,
+        title: cleanTitle,
+        artist: cleanArtist,
+        createdAt: Date.now(),
+        analysis: res.analysis,
+        lyrics: res.lyrics || "",
+        romanized,
+        romanizationStyle: style,
+        capo: 0,
+        transpose: 0,
+        notes: `Imported from ${rawLink}`,
+        engine: "tensorflow",
+        ...(cleanArtwork ? { artwork: cleanArtwork } : {}),
+        ...(res.audioUrl ? { audioUrl: res.audioUrl } : {}),
+        ...(res.syncedLyrics && res.syncedLyrics.length ? { syncedLyrics: res.syncedLyrics } : {}),
+      });
+
+      setProgress(100);
+      toast.success(`Full song analyzed! Opening "${cleanTitle}"...`);
+      void navigate({ to: "/song/$id", params: { id: res.id } });
     } catch (e) {
-      console.warn("Audio link download error:", e);
-      const errMsg = e instanceof Error ? e.message : "Could not download audio from link";
-      toast.error(`Download failed: ${errMsg}`);
+      console.error("Link analysis error:", e);
+      const errMsg = e instanceof Error ? e.message : "Could not analyze audio from that link";
+      toast.error(`Analysis failed: ${errMsg}`);
+    } finally {
+      setImporting(false);
       setBusy(false);
       setProgress(0);
       setStage("");
-    } finally {
-      setImporting(false);
     }
   }
 
@@ -315,12 +432,19 @@ function AnalyzePage() {
     const currentSynced = overrideSynced || synced;
 
     setBusy(true);
-    setProgress(2);
-    setStage("Decoding audio");
+    setProgress(5);
+    setStage("Reading audio file...");
     try {
-      const arrayBuffer = await targetFile.arrayBuffer();
-      const ctx = new OfflineAudioContext(1, 1, 22050);
-      const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+      let duration = 180;
+      let decodedBuffer: AudioBuffer | null = null;
+      try {
+        const ab = await readFileAsArrayBuffer(targetFile);
+        const res = await safeDecodeAudio(ab);
+        duration = res.duration || 180;
+        decodedBuffer = res.buffer;
+      } catch (err) {
+        console.warn("Could not pre-decode audio:", err);
+      }
 
       let analysis: AnalysisResult | null = null;
       let engine: "tensorflow" | "chordmini" | "local" = "local";
@@ -328,8 +452,8 @@ function AnalyzePage() {
 
       if (selectedEngine === "tensorflow" && settings.features.tensorflow_analysis) {
         setStage(`Analysing with your TensorFlow model (${acrLanguage})`);
-        setProgress(15);
-        const outcome = await analyzeWithTensorFlow(targetFile, decoded.duration, acrLanguage);
+        setProgress(20);
+        const outcome = await analyzeWithTensorFlow(targetFile, duration, acrLanguage);
         if (outcome.ok) {
           analysis = outcome.analysis;
           engine = "tensorflow";
@@ -337,14 +461,14 @@ function AnalyzePage() {
         } else {
           toast.warning(
             settings.features.chordmini_analysis
-              ? `${outcome.reason} — trying ChordMini instead`
+              ? `${outcome.reason} ? trying ChordMini instead`
               : settings.features.local_analysis
-                ? `${outcome.reason} — analysing on device instead`
+                ? `${outcome.reason} ? analysing on device instead`
                 : outcome.reason,
           );
           if (settings.features.chordmini_analysis) {
-            setStage("TensorFlow unavailable — trying ChordMini");
-            const fallback = await analyzeWithChordMini(targetFile, decoded.duration, {
+            setStage("TensorFlow unavailable ? trying ChordMini");
+            const fallback = await analyzeWithChordMini(targetFile, duration, {
               beatModel: "auto",
               chordModel,
             });
@@ -365,8 +489,8 @@ function AnalyzePage() {
         settings.features.chordmini_analysis
       ) {
         setStage("Analysing with ChordMini");
-        setProgress(15);
-        const outcome = await analyzeWithChordMini(targetFile, decoded.duration, {
+        setProgress(20);
+        const outcome = await analyzeWithChordMini(targetFile, duration, {
           beatModel: selectedEngine === "chordmini-auto" ? "auto" : selectedEngine,
           chordModel,
         });
@@ -378,21 +502,26 @@ function AnalyzePage() {
         } else {
           toast.warning(
             settings.features.local_analysis
-              ? `${outcome.reason} — analysing on device instead`
+              ? `${outcome.reason} ? analysing on device instead`
               : outcome.reason,
           );
         }
       }
 
       if (!analysis && settings.features.local_analysis) {
+        if (!decodedBuffer) {
+          throw new Error("Could not decode audio on this device for local analysis.");
+        }
+        setStage("Analysing on device...");
+        setProgress(30);
         // Downsample to 22.05 kHz mono for a faster, cleaner chromagram.
         const off = new OfflineAudioContext(
           1,
-          Math.ceil((decoded.duration * 22050) as number),
+          Math.ceil((decodedBuffer.duration * 22050) as number),
           22050,
         );
         const src = off.createBufferSource();
-        src.buffer = decoded;
+        src.buffer = decodedBuffer;
         src.connect(off.destination);
         src.start();
         const mono = await off.startRendering();
@@ -414,7 +543,7 @@ function AnalyzePage() {
       if (!lyricText.trim() && currentTitle && settings.features.lyrics_lookup) {
         setStage("Looking up lyrics");
         setProgress(88);
-        const found = await grabLyrics(true, currentTitle, currentArtist, decoded.duration);
+        const found = await grabLyrics(true, currentTitle, currentArtist, duration);
         if (found.length) syncedLines = found;
         lyricText = found.length ? found.map((l) => l.text).join("\n") : lyricText;
       }
@@ -439,7 +568,6 @@ function AnalyzePage() {
         id,
         title: currentTitle || targetFile.name.replace(/\.[^.]+$/, ""),
         artist: currentArtist,
-        artwork: currentArtwork || undefined,
         createdAt: Date.now(),
         analysis,
         lyrics: lyricText,
@@ -449,6 +577,7 @@ function AnalyzePage() {
         transpose: 0,
         notes: "",
         engine,
+        ...(currentArtwork ? { artwork: currentArtwork } : {}),
         ...(models ? { models } : {}),
         ...(syncedLines.length ? { syncedLyrics: syncedLines } : {}),
       });

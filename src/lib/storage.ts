@@ -10,6 +10,7 @@ export interface Song {
   title: string;
   artist: string;
   artwork?: string | undefined;
+  audioUrl?: string | undefined;
   createdAt: number;
   analysis: AnalysisResult;
   /** raw lyrics pasted by the user */
