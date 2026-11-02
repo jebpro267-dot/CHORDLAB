@@ -5,19 +5,29 @@
  * Priority:
  *  1. Value stored in localStorage under "chordlab_backend_url"
  *  2. VITE_BACKEND_URL env var (set at build time)
- *  3. PERMANENT_BACKEND_URL hard-coded fallback (Cloudflare tunnel / production server)
+ *  3. PERMANENT_BACKEND_URL hard-coded fallback (Cloudflare tunnel)
+ *  4. LOCAL_WIFI_BACKEND_URL fallback (Direct local PC IP on Wi-Fi)
  */
 export const PERMANENT_BACKEND_URL = "https://enter-decent-blink-wallet.trycloudflare.com";
+export const LOCAL_WIFI_BACKEND_URL = "http://192.168.0.109:8000";
 
 /**
  * Returns the currently active backend base URL.
- * Users can override the server from Settings — any https:// URL (including LAN IPs) is accepted.
+ * Users can override the server from Settings — any https:// or local Wi-Fi http:// URL is accepted.
  */
 export function getBackendBaseUrl(): string {
   try {
     const custom = localStorage.getItem("chordlab_backend_url");
     if (custom && custom.trim()) {
-      return custom.trim().replace(/\/+$/, "");
+      const trimmed = custom.trim().replace(/\/+$/, "");
+      // Discard dead legacy URLs automatically
+      if (
+        !trimmed.includes("onrender.com") &&
+        !trimmed.includes("certification-manga-framing-varied")
+      ) {
+        return trimmed;
+      }
+      localStorage.removeItem("chordlab_backend_url");
     }
   } catch {
     // ignore
@@ -52,20 +62,39 @@ export function backendUrl(path: string): string {
 
 /**
  * Wraps the browser's `fetch` with automatic JWT Bearer token injection from
- * `localStorage`.  The token is NOT added when an `Authorization` header is
- * already present in `init`.
+ * `localStorage` and dual-network resilience (Cloudflare Tunnel <-> Local Wi-Fi).
  *
  * @param path - API path to call (resolved via `backendUrl`).
  * @param init - Optional `RequestInit` options forwarded to `fetch`.
  * @returns The raw `Response` promise.
  */
-export function backendFetch(path: string, init?: RequestInit): Promise<Response> {
+export async function backendFetch(path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   const token = localStorage.getItem("chordlab-user-token");
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
-  return fetch(backendUrl(path), { ...init, headers });
+  const primaryUrl = backendUrl(path);
+  try {
+    return await fetch(primaryUrl, { ...init, headers });
+  } catch (err) {
+    // If primary failed with network error, try automatic fallback
+    const isLocal = primaryUrl.startsWith("http://192.168.");
+    const fallbackBase = isLocal ? PERMANENT_BACKEND_URL : LOCAL_WIFI_BACKEND_URL;
+    if (fallbackBase && !primaryUrl.startsWith(fallbackBase)) {
+      try {
+        const fallbackUrl = `${fallbackBase}${path}`;
+        const res = await fetch(fallbackUrl, { ...init, headers });
+        if (res.ok) {
+          setBackendBaseUrl(fallbackBase);
+          return res;
+        }
+      } catch {
+        // fallback also failed, rethrow original error
+      }
+    }
+    throw err;
+  }
 }
 
 /**

@@ -1,729 +1,1456 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
-import { Cpu, Link2, Loader2, Mic, Music4, Square, TextSearch, Upload, Wand2 } from "lucide-react";
-
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
-import { Textarea } from "@/components/ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { analyzeAudioBuffer, type ACRLanguage, type AnalysisResult } from "@/lib/audio-analysis";
-import { putAudio } from "@/lib/audio-store";
-import { analyzeWithTensorFlow } from "@/lib/chordmini";
-import { importLink } from "@/lib/link-import.functions";
-import { fetchSyncedLyrics, type SyncedLine } from "@/lib/lyrics-fetch.functions";
-import { romanizeLyrics } from "@/lib/lyrics.functions";
-import { newId, saveSong } from "@/lib/storage";
-import { useAppSettings } from "@/lib/app-settings";
-import { backendFetch, backendJson } from "@/lib/backend";
-import { getMicrophoneStream } from "@/lib/microphone";
-
-export const Route = createFileRoute("/analyze")({
-  head: () => ({
-    meta: [
-      { title: "Analyze a Song — ChordLab" },
-      {
-        name: "description",
-        content:
-          "Import a YouTube or Spotify link, pick an audio file or record what's playing, and get chords, key, tempo and a chord sheet with Hinglish and Tanglish lyrics.",
-      },
-      { property: "og:title", content: "Analyze a Song — ChordLab" },
-      {
-        property: "og:description",
-        content: "Chords, key and tempo from any track, right on your phone.",
-      },
-      { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary_large_image" },
-    ],
-  }),
-  component: AnalyzePage,
-});
-
-type Style = "auto" | "hinglish" | "tanglish" | "english";
-type AnalysisEngine = "tensorflow" | "local";
-
-
-async function readFileAsArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
-  if (typeof blob.arrayBuffer === "function") {
-    try {
-      return await blob.arrayBuffer();
-    } catch {
-      // fallback to FileReader
-    }
-  }
-  return new Promise<ArrayBuffer>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as ArrayBuffer);
-    reader.onerror = () => reject(reader.error || new Error("Failed to read audio file"));
-    reader.readAsArrayBuffer(blob);
-  });
-}
-
-async function safeDecodeAudio(
-  arrayBuffer: ArrayBuffer,
-): Promise<{ duration: number; buffer: AudioBuffer | null }> {
-  const AudioCtx =
-    window.AudioContext ||
-    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-  if (!AudioCtx) {
-    return { duration: 180, buffer: null };
-  }
-  let ctx: AudioContext | null = null;
-  try {
-    ctx = new AudioCtx();
-    const copy = arrayBuffer.slice(0);
-    const buffer = await new Promise<AudioBuffer>((resolve, reject) => {
-      let resolved = false;
-      const promise = ctx!.decodeAudioData(
-        copy,
-        (decoded) => {
-          if (!resolved) {
-            resolved = true;
-            resolve(decoded);
-          }
-        },
-        (err) => {
-          if (!resolved) {
-            resolved = true;
-            reject(err);
-          }
-        },
-      );
-      if (promise && typeof promise.then === "function") {
-        promise.then(
-          (decoded) => {
-            if (!resolved) {
-              resolved = true;
-              resolve(decoded);
-            }
-          },
-          (err) => {
-            if (!resolved) {
-              resolved = true;
-              reject(err);
-            }
-          },
-        );
-      }
-    });
-    return { duration: buffer.duration || 180, buffer };
-  } catch (err) {
-    console.warn("safeDecodeAudio fallback:", err);
-    return { duration: 180, buffer: null };
-  } finally {
-    if (ctx && ctx.state !== "closed") {
-      void ctx.close().catch(() => {});
-    }
-  }
-}
-
-function parseFileTitleAndArtist(raw: string): { title: string; artist: string } {
-  let name = raw.replace(/\.[^.]+$/, "");
-  name = name.replace(/--?\s*(slowed|reverb|reverbed|remix|official|video|audio|lyrics|256k|320k|8d).*$/i, "");
-  name = name.replace(/\s*[\(\[](official|video|audio|lyrics|remix|hd|4k|hq|visualizer)[^\)\]]*[\)\]]/gi, "");
-  name = name.trim();
-  const dash = name.match(/^(.{1,60}?)\s+[-–—]\s+(.+)$/);
-  if (dash) {
-    return { artist: dash[1].trim(), title: dash[2].trim() };
-  }
-  return { title: name, artist: "" };
-}
-
-function AnalyzePage() {
-  const { settings } = useAppSettings();
-  const navigate = useNavigate();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const [file, setFile] = useState<File | null>(null);
-  const [title, setTitle] = useState("");
-  const [artist, setArtist] = useState("");
-  const [lyrics, setLyrics] = useState("");
-  const [synced, setSynced] = useState<SyncedLine[]>([]);
-  const [style, setStyle] = useState<Style>("auto");
-  const [acrLanguage, setAcrLanguage] = useState<ACRLanguage>("auto");
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [stage, setStage] = useState("");
-  const [link, setLink] = useState("");
-  const [artwork, setArtwork] = useState("");
-  const [importing, setImporting] = useState(false);
-  const [fetchingLyrics, setFetchingLyrics] = useState(false);
-  const [recording, setRecording] = useState(false);
-  const [recSecs, setRecSecs] = useState(0);
-  const [selectedEngine, setSelectedEngine] = useState<AnalysisEngine>(
-    settings.features.tensorflow_analysis ? "tensorflow" : "local",
-  );
-
-  useEffect(() => {
-    if (!recording) return;
-    const iv = window.setInterval(() => setRecSecs((s) => s + 1), 1000);
-    return () => window.clearInterval(iv);
-  }, [recording]);
-
-  useEffect(() => {
-    setSelectedEngine((current) => {
-      if (current === "tensorflow" && !settings.features.tensorflow_analysis) {
-        return "local";
-      }
-      if (current === "local" && !settings.features.local_analysis) {
-        return settings.features.tensorflow_analysis ? "tensorflow" : current;
-      }
-      return current;
-    });
-  }, [settings.features.local_analysis, settings.features.tensorflow_analysis]);
-
-  function onPick(f: File | null) {
-    if (!f) return;
-    setFile(f);
-    const { title: cleanT, artist: cleanA } = parseFileTitleAndArtist(f.name);
-    if (cleanT) setTitle(cleanT);
-    if (cleanA) setArtist(cleanA);
-    toast.success(`Selected "${cleanT}" — tap Detect chords below`);
-    setTimeout(() => {
-      void grabLyrics(true, cleanT, cleanA);
-    }, 200);
-  }
-
-  async function runImport() {
-    const rawLink = link.trim();
-    if (!rawLink) {
-      toast.error("Please paste a YouTube or Spotify link first");
-      return;
-    }
-    setImporting(true);
-    setBusy(true);
-    setProgress(15);
-    setStage("Connecting to server & analyzing full song from link...");
-    try {
-      toast.info("Downloading track, syncing lyrics, and analyzing entire song with TensorFlow...");
-      const res = await backendJson<{
-        ok: boolean;
-        id: string;
-        title: string;
-        artist: string;
-        artwork: string;
-        audioUrl: string;
-        lyrics: string;
-        syncedLyrics: SyncedLine[];
-        analysis: AnalysisResult;
-      }>("/api/analyze-link", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ url: rawLink, language: acrLanguage }),
-      });
-
-      if (!res.ok || !res.analysis) {
-        throw new Error("Server failed to analyze the song link.");
-      }
-
-      const cleanTitle = res.title || "Audio Track";
-      const cleanArtist = res.artist || "";
-      const cleanArtwork = res.artwork || "";
-
-      setTitle(cleanTitle);
-      if (cleanArtist) setArtist(cleanArtist);
-      if (cleanArtwork) setArtwork(cleanArtwork);
-      if (res.lyrics) setLyrics(res.lyrics);
-      if (res.syncedLyrics) setSynced(res.syncedLyrics);
-
-      setProgress(75);
-      setStage("Caching audio and syncing lyrics...");
-
-      // Download audio blob in background to cache in IndexedDB
-      try {
-        const audioRes = await backendFetch(res.audioUrl);
-        if (audioRes.ok) {
-          const blob = await audioRes.blob();
-          await putAudio(res.id, blob);
-        }
-      } catch (cacheErr) {
-        console.warn("Could not cache audio locally:", cacheErr);
-      }
-
-      // Transliteration if selected
-      let romanized = "";
-      if (res.lyrics && res.lyrics.trim() && style !== "english" && settings.features.lyric_romanization) {
-        setStage("Transliterating lyrics");
-        setProgress(90);
-        try {
-          const r = await romanizeLyrics({ data: { lyrics: res.lyrics, style } });
-          romanized = r.text;
-        } catch {
-          // ignore
-        }
-      }
-
-      setStage("Saving chord sheet");
-      setProgress(98);
-      saveSong({
-        id: res.id,
-        title: cleanTitle,
-        artist: cleanArtist,
-        createdAt: Date.now(),
-        analysis: res.analysis,
-        lyrics: res.lyrics || "",
-        romanized,
-        romanizationStyle: style,
-        capo: 0,
-        transpose: 0,
-        notes: `Imported from ${rawLink}`,
-        engine: "tensorflow",
-        ...(cleanArtwork ? { artwork: cleanArtwork } : {}),
-        ...(res.audioUrl ? { audioUrl: res.audioUrl } : {}),
-        ...(res.syncedLyrics && res.syncedLyrics.length ? { syncedLyrics: res.syncedLyrics } : {}),
-      });
-
-      setProgress(100);
-      toast.success(`Full song analyzed! Opening "${cleanTitle}"...`);
-      void navigate({ to: "/song/$id", params: { id: res.id } });
-    } catch (e) {
-      console.error("Link analysis error:", e);
-      const errMsg = e instanceof Error ? e.message : "Could not analyze audio from that link";
-      toast.error(`Analysis failed: ${errMsg}`);
-    } finally {
-      setImporting(false);
-      setBusy(false);
-      setProgress(0);
-      setStage("");
-    }
-  }
-
-  async function grabLyrics(
-    silent = false,
-    lookupTitle?: string,
-    lookupArtist?: string,
-    durationHint?: number,
-  ): Promise<SyncedLine[]> {
-    const t = (lookupTitle || title).trim();
-    const a = (lookupArtist || artist).trim();
-    if (!t) {
-      if (!silent) toast.error("Add a title first");
-      return [];
-    }
-    setFetchingLyrics(true);
-    try {
-      const res = await fetchSyncedLyrics({
-        data: { title: t, ...(a ? { artist: a } : {}), ...(durationHint ? { duration: durationHint } : {}) },
-      });
-      if (res.found && (res.plain || res.synced.length)) {
-        setLyrics(res.plain);
-        setSynced(res.synced);
-        if (!silent) {
-          toast.success(
-            res.synced.length ? "Found time-synced lyrics" : "Found lyrics (no timings available)",
-          );
-        }
-        return res.synced;
-      }
-      if (!silent) toast.info("No lyrics found in public catalog. You can paste or type them below.");
-      return [];
-    } catch {
-      if (!silent) toast.error("Lyrics lookup timed out or failed");
-      return [];
-    } finally {
-      setFetchingLyrics(false);
-    }
-  }
-
-  async function toggleRecord() {
-    if (recording) {
-      recorderRef.current?.stop();
-      return;
-    }
-    try {
-      const stream = await getMicrophoneStream();
-      const rec = new MediaRecorder(stream);
-      recorderRef.current = rec;
-      const chunks: BlobPart[] = [];
-      rec.ondataavailable = (e) => chunks.push(e.data);
-      rec.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
-        const f = new File([blob], "recording.webm", { type: blob.type });
-        setFile(f);
-        setRecording(false);
-        if (!title) setTitle("Recording");
-        toast.success("Recording captured — tap Detect chords");
-      };
-      setRecSecs(0);
-      rec.start();
-      setRecording(true);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Microphone access was blocked");
-    }
-  }
-
-  async function run(
-    overrideFile?: File,
-    overrideTitle?: string,
-    overrideArtist?: string,
-    overrideArtwork?: string,
-    overrideSynced?: SyncedLine[],
-  ) {
-    const targetFile = overrideFile || file;
-    if (!targetFile) {
-      toast.error("Choose an audio file first");
-      return;
-    }
-    const currentTitle = (overrideTitle || title).trim();
-    const currentArtist = (overrideArtist || artist).trim();
-    const currentArtwork = (overrideArtwork || artwork).trim();
-    const currentSynced = overrideSynced || synced;
-
-    setBusy(true);
-    setProgress(5);
-    setStage("Reading audio file...");
-    try {
-      let duration = 180;
-      let decodedBuffer: AudioBuffer | null = null;
-      try {
-        const ab = await readFileAsArrayBuffer(targetFile);
-        const res = await safeDecodeAudio(ab);
-        duration = res.duration || 180;
-        decodedBuffer = res.buffer;
-      } catch (err) {
-        console.warn("Could not pre-decode audio:", err);
-      }
-
-      let analysis: AnalysisResult | null = null;
-      let engine: "tensorflow" | "local" = "local";
-
-      if (selectedEngine === "tensorflow" && settings.features.tensorflow_analysis) {
-        setStage(`Analysing with your TensorFlow model (${acrLanguage})`);
-        setProgress(20);
-        const outcome = await analyzeWithTensorFlow(targetFile, duration, acrLanguage);
-        if (outcome.ok) {
-          analysis = outcome.analysis;
-          engine = "tensorflow";
-          setProgress(85);
-        } else {
-          toast.warning(
-            settings.features.local_analysis
-              ? `${outcome.reason} — analysing on device instead`
-              : outcome.reason,
-          );
-        }
-      }
-
-      if (!analysis && settings.features.local_analysis) {
-        if (!decodedBuffer) {
-          throw new Error("Could not decode audio on this device for local analysis.");
-        }
-        setStage("Analysing on device...");
-        setProgress(30);
-        // Downsample to 22.05 kHz mono for a faster, cleaner chromagram.
-        const off = new OfflineAudioContext(
-          1,
-          Math.ceil((decodedBuffer.duration * 22050) as number),
-          22050,
-        );
-        const src = off.createBufferSource();
-        src.buffer = decodedBuffer;
-        src.connect(off.destination);
-        src.start();
-        const mono = await off.startRendering();
-
-        analysis = await analyzeAudioBuffer(mono, {
-          language: acrLanguage,
-          onProgress: (p, s) => {
-            setProgress(Math.min(85, p * 0.85));
-            setStage(s);
-          },
-        });
-      }
-      if (!analysis) {
-        throw new Error("No analysis engine is available right now.");
-      }
-
-      let lyricText = lyrics;
-      let syncedLines = currentSynced;
-      if (!lyricText.trim() && currentTitle && settings.features.lyrics_lookup) {
-        setStage("Looking up lyrics");
-        setProgress(88);
-        const found = await grabLyrics(true, currentTitle, currentArtist, duration);
-        if (found.length) syncedLines = found;
-        lyricText = found.length ? found.map((l) => l.text).join("\n") : lyricText;
-      }
-
-      let romanized = "";
-      if (lyricText.trim() && style !== "english" && settings.features.lyric_romanization) {
-        setStage("Transliterating lyrics");
-        setProgress(93);
-        try {
-          const res = await romanizeLyrics({ data: { lyrics: lyricText, style } });
-          romanized = res.text;
-        } catch (e) {
-          toast.warning(e instanceof Error ? e.message : "Transliteration skipped");
-        }
-      }
-
-      const id = newId();
-      setStage("Saving");
-      setProgress(97);
-      await putAudio(id, targetFile);
-      saveSong({
-        id,
-        title: currentTitle || targetFile.name.replace(/\.[^.]+$/, ""),
-        artist: currentArtist,
-        createdAt: Date.now(),
-        analysis,
-        lyrics: lyricText,
-        romanized,
-        romanizationStyle: style,
-        capo: 0,
-        transpose: 0,
-        notes: "",
-        engine,
-        ...(currentArtwork ? { artwork: currentArtwork } : {}),
-        ...(models ? { models } : {}),
-        ...(syncedLines.length ? { syncedLyrics: syncedLines } : {}),
-      });
-      setProgress(100);
-      const usedLang = analysis.language || (acrLanguage !== "auto" ? acrLanguage : "detected");
-      toast.success(
-        engine === "tensorflow"
-          ? `Analysed with TensorFlow (${usedLang} model)`
-          : `Analysis complete on device (${usedLang} profile)`,
-      );
-      void navigate({ to: "/song/$id", params: { id } });
-    } catch (e) {
-      console.error(e);
-      toast.error(e instanceof Error ? e.message : "Could not analyze that file");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="mx-auto max-w-lg px-4 pt-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Analyze a song</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Your TensorFlow chord model runs through the Python API, with ChordMini and on-device
-        analysis as fallbacks.
-      </p>
-
-      <div className="panel mt-5 p-4">
-        {settings.features.link_import && <>
-          <Label htmlFor="link" className="text-sm font-semibold flex items-center gap-2">
-            <Link2 className="size-4 text-primary" />
-            <span>YouTube, Spotify or Web Audio Link</span>
-          </Label>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Paste any YouTube video, Spotify track, or web audio link. ChordLab will automatically download the full track and directly analyze chords, key, tempo and synced lyrics across the entire song.
-          </p>
-          <div className="mt-3 flex flex-col sm:flex-row gap-2">
-            <Input
-              id="link"
-              value={link}
-              placeholder="https://youtu.be/... or open.spotify.com/track/..."
-              onChange={(e) => setLink(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void runImport();
-                }
-              }}
-              className="flex-1 font-mono text-xs"
-            />
-            <Button
-              variant="default"
-              onClick={() => void runImport()}
-              disabled={importing || busy}
-              className="gap-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black font-semibold shadow-md active:scale-95"
-            >
-              {importing ? <Loader2 className="size-4 animate-spin" /> : <Wand2 className="size-4" />}
-              <span>{importing ? "Downloading and Analyzing..." : "Analyze Full Song"}</span>
-            </Button>
-          </div>
-        </>}
-        {artwork && (
-          <img
-            src={artwork}
-            alt={`Artwork for ${title || "the imported track"}`}
-            loading="lazy"
-            className="mt-3 h-24 w-full rounded-lg object-cover"
-          />
-        )}
-        <Button
-          variant={recording ? "destructive" : "secondary"}
-          className="mt-3 w-full"
-          onClick={() => void toggleRecord()}
-        >
-          {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
-          {recording ? `Stop recording (${recSecs}s)` : "Record what's playing"}
-        </Button>
-      </div>
-
-      <div className="panel mt-4 p-4">
-        <label
-          htmlFor="audio-file-input"
-          className="relative flex w-full cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-surface-2/40 px-4 py-8 text-center transition-colors hover:border-primary/60 active:bg-surface-2/70"
-        >
-          <input
-            id="audio-file-input"
-            ref={fileRef}
-            type="file"
-            accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.weba,.webm,audio/mpeg,audio/wav,audio/x-m4a,audio/flac,audio/ogg,*/*"
-            className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
-            onChange={(e) => onPick(e.target.files?.[0] ?? null)}
-          />
-          {file ? (
-            <>
-              <Music4 className="size-7 text-primary" />
-              <span className="text-sm font-medium">{file.name}</span>
-              <span className="text-xs text-muted-foreground">Tap to choose another file</span>
-            </>
-          ) : (
-            <>
-              <Upload className="size-7 text-primary" />
-              <span className="text-sm font-medium">Choose an audio file</span>
-              <span className="text-xs text-muted-foreground">MP3, WAV, M4A, FLAC, OGG</span>
-            </>
-          )}
-        </label>
-
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="title">Title</Label>
-            <Input id="title" value={title} onChange={(e) => setTitle(e.target.value)} />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="artist">Artist</Label>
-            <Input id="artist" value={artist} onChange={(e) => setArtist(e.target.value)} />
-          </div>
-        </div>
-      </div>
-
-      <div className="panel mt-4 p-4">
-        <div className="flex items-center gap-2">
-          <Cpu className="size-4 text-primary" />
-          <Label>Analysis engine</Label>
-        </div>
-        <Select
-          value={selectedEngine}
-          onValueChange={(v) => setSelectedEngine(v as AnalysisEngine)}
-        >
-          <SelectTrigger className="mt-2">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {settings.features.tensorflow_analysis && (
-              <SelectItem value="tensorflow">Your TensorFlow model · API</SelectItem>
-            )}
-            {settings.features.local_analysis && (
-              <SelectItem value="local">On-device only (offline)</SelectItem>
-            )}
-          </SelectContent>
-        </Select>
-        <p className="mt-2 text-xs text-muted-foreground">
-          {selectedEngine === "tensorflow"
-            ? "Your trained TensorFlow model recognizes chords in the Python API, with on-device analysis as fallback."
-            : "Everything runs on your device — your audio never leaves the phone."}
-        </p>
-
-        <div className="mt-4 border-t border-border/60 pt-3">
-          <Label className="text-xs font-medium">Musical language &amp; chord profile</Label>
-          <Select
-            value={acrLanguage}
-            onValueChange={(v) => {
-              const lang = v as ACRLanguage;
-              setAcrLanguage(lang);
-              if (lang === "hindi" && style === "auto") setStyle("hinglish");
-              else if (lang === "tamil" && style === "auto") setStyle("tanglish");
-              else if (lang === "english" && style === "auto") setStyle("english");
-            }}
-          >
-            <SelectTrigger className="mt-1.5">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">Auto detect (English · Hindi · Tamil)</SelectItem>
-              <SelectItem value="english">English · Western pop / rock / classical</SelectItem>
-              <SelectItem value="hindi">Hindi · Bollywood / Hindustani raga idioms</SelectItem>
-              <SelectItem value="tamil">Tamil · Kollywood / Carnatic &amp; mediant harmony</SelectItem>
-            </SelectContent>
-          </Select>
-          <p className="mt-1.5 text-xs text-muted-foreground">
-            Applies specialized chord transition matrices and key profiles to both the TensorFlow model and the in-system engine.
-          </p>
-        </div>
-      </div>
-
-      <div className="panel mt-4 p-4">
-        <div className="flex items-center justify-between gap-2">
-          <Label htmlFor="lyrics">Lyrics (optional)</Label>
-          {settings.features.lyrics_lookup && <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => void grabLyrics()}
-            disabled={fetchingLyrics}
-          >
-            {fetchingLyrics ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <TextSearch className="size-4" />
-            )}
-            Generate lyrics (Gemini)
-          </Button>}
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Fetch time-synced lyrics by title and artist, or paste your own. Add markers like [Verse]
-          or [Chorus] to shape the sheet.
-        </p>
-        <Textarea
-          id="lyrics"
-          value={lyrics}
-          onChange={(e) => {
-            setLyrics(e.target.value);
-            setSynced([]);
-          }}
-          rows={7}
-          placeholder={"[Verse]\nyour lyric line here\nanother line\n\n[Chorus]\n..."}
-          className="mt-2 font-mono text-xs"
-        />
-        {synced.length > 0 && (
-          <p className="mt-2 text-xs text-primary">
-            {synced.length} timed lines — chords will align to the exact words.
-          </p>
-        )}
-        <div className="mt-3 space-y-1.5">
-          <Label>Transliteration</Label>
-          <Select value={style} onValueChange={(v) => setStyle(v as Style)}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">Auto detect (Hinglish / Tanglish / other)</SelectItem>
-              <SelectItem value="hinglish">Hinglish (Hindi in Roman script)</SelectItem>
-              <SelectItem value="tanglish">Tanglish (Tamil in Roman script)</SelectItem>
-              <SelectItem value="english">None</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      {busy && (
-        <div className="panel mt-4 p-4">
-          <div className="flex items-center gap-2 text-sm">
-            <Loader2 className="size-4 animate-spin text-primary" />
-            {stage}
-          </div>
-          <Progress value={progress} className="mt-3" />
-        </div>
-      )}
-
-      <Button size="lg" className="mt-5 w-full" onClick={() => void run()} disabled={busy || !file}>
-        <Wand2 className="size-4" />
-        {busy ? "Analyzing…" : "Detect chords"}
-      </Button>
-    </div>
-  );
-}
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+
+import { useEffect, useRef, useState } from "react";
+
+import { toast } from "sonner";
+
+import { Cpu, Link2, Loader2, Mic, Music4, Square, TextSearch, Upload, Wand2 } from "lucide-react";
+
+
+
+import { Button } from "@/components/ui/button";
+
+import { Input } from "@/components/ui/input";
+
+import { Label } from "@/components/ui/label";
+
+import { Progress } from "@/components/ui/progress";
+
+import { Textarea } from "@/components/ui/textarea";
+
+import {
+
+  Select,
+
+  SelectContent,
+
+  SelectItem,
+
+  SelectTrigger,
+
+  SelectValue,
+
+} from "@/components/ui/select";
+
+import { analyzeAudioBuffer, type ACRLanguage, type AnalysisResult } from "@/lib/audio-analysis";
+
+import { putAudio } from "@/lib/audio-store";
+
+import { analyzeWithTensorFlow } from "@/lib/chordmini";
+
+import { importLink } from "@/lib/link-import.functions";
+
+import { fetchSyncedLyrics, type SyncedLine } from "@/lib/lyrics-fetch.functions";
+
+import { romanizeLyrics } from "@/lib/lyrics.functions";
+
+import { newId, saveSong } from "@/lib/storage";
+
+import { useAppSettings } from "@/lib/app-settings";
+
+import { backendFetch, backendJson } from "@/lib/backend";
+
+import { getMicrophoneStream } from "@/lib/microphone";
+
+
+
+export const Route = createFileRoute("/analyze")({
+
+  head: () => ({
+
+    meta: [
+
+      { title: "Analyze a Song — ChordLab" },
+
+      {
+
+        name: "description",
+
+        content:
+
+          "Import a YouTube or Spotify link, pick an audio file or record what's playing, and get chords, key, tempo and a chord sheet with Hinglish and Tanglish lyrics.",
+
+      },
+
+      { property: "og:title", content: "Analyze a Song — ChordLab" },
+
+      {
+
+        property: "og:description",
+
+        content: "Chords, key and tempo from any track, right on your phone.",
+
+      },
+
+      { property: "og:type", content: "website" },
+
+      { name: "twitter:card", content: "summary_large_image" },
+
+    ],
+
+  }),
+
+  component: AnalyzePage,
+
+});
+
+
+
+type Style = "auto" | "hinglish" | "tanglish" | "english";
+
+type AnalysisEngine = "tensorflow" | "local";
+
+
+
+
+
+async function readFileAsArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
+
+  if (typeof blob.arrayBuffer === "function") {
+
+    try {
+
+      return await blob.arrayBuffer();
+
+    } catch {
+
+      // fallback to FileReader
+
+    }
+
+  }
+
+  return new Promise<ArrayBuffer>((resolve, reject) => {
+
+    const reader = new FileReader();
+
+    reader.onload = () => resolve(reader.result as ArrayBuffer);
+
+    reader.onerror = () => reject(reader.error || new Error("Failed to read audio file"));
+
+    reader.readAsArrayBuffer(blob);
+
+  });
+
+}
+
+
+
+async function safeDecodeAudio(
+
+  arrayBuffer: ArrayBuffer,
+
+): Promise<{ duration: number; buffer: AudioBuffer | null }> {
+
+  const AudioCtx =
+
+    window.AudioContext ||
+
+    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+
+  if (!AudioCtx) {
+
+    return { duration: 180, buffer: null };
+
+  }
+
+  let ctx: AudioContext | null = null;
+
+  try {
+
+    ctx = new AudioCtx();
+
+    const copy = arrayBuffer.slice(0);
+
+    const buffer = await new Promise<AudioBuffer>((resolve, reject) => {
+
+      let resolved = false;
+
+      const promise = ctx!.decodeAudioData(
+
+        copy,
+
+        (decoded) => {
+
+          if (!resolved) {
+
+            resolved = true;
+
+            resolve(decoded);
+
+          }
+
+        },
+
+        (err) => {
+
+          if (!resolved) {
+
+            resolved = true;
+
+            reject(err);
+
+          }
+
+        },
+
+      );
+
+      if (promise && typeof promise.then === "function") {
+
+        promise.then(
+
+          (decoded) => {
+
+            if (!resolved) {
+
+              resolved = true;
+
+              resolve(decoded);
+
+            }
+
+          },
+
+          (err) => {
+
+            if (!resolved) {
+
+              resolved = true;
+
+              reject(err);
+
+            }
+
+          },
+
+        );
+
+      }
+
+    });
+
+    return { duration: buffer.duration || 180, buffer };
+
+  } catch (err) {
+
+    console.warn("safeDecodeAudio fallback:", err);
+
+    return { duration: 180, buffer: null };
+
+  } finally {
+
+    if (ctx && ctx.state !== "closed") {
+
+      void ctx.close().catch(() => {});
+
+    }
+
+  }
+
+}
+
+
+
+function parseFileTitleAndArtist(raw: string): { title: string; artist: string } {
+
+  let name = raw.replace(/\.[^.]+$/, "");
+
+  name = name.replace(/--?\s*(slowed|reverb|reverbed|remix|official|video|audio|lyrics|256k|320k|8d).*$/i, "");
+
+  name = name.replace(/\s*[\(\[](official|video|audio|lyrics|remix|hd|4k|hq|visualizer)[^\)\]]*[\)\]]/gi, "");
+
+  name = name.trim();
+
+  const dash = name.match(/^(.{1,60}?)\s+[-–—]\s+(.+)$/);
+
+  if (dash) {
+
+    return { artist: dash[1].trim(), title: dash[2].trim() };
+
+  }
+
+  return { title: name, artist: "" };
+
+}
+
+
+
+function AnalyzePage() {
+
+  const { settings } = useAppSettings();
+
+  const navigate = useNavigate();
+
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const recorderRef = useRef<MediaRecorder | null>(null);
+
+  const [file, setFile] = useState<File | null>(null);
+
+  const [title, setTitle] = useState("");
+
+  const [artist, setArtist] = useState("");
+
+  const [lyrics, setLyrics] = useState("");
+
+  const [synced, setSynced] = useState<SyncedLine[]>([]);
+
+  const [style, setStyle] = useState<Style>("auto");
+
+  const [acrLanguage, setAcrLanguage] = useState<ACRLanguage>("auto");
+
+  const [busy, setBusy] = useState(false);
+
+  const [progress, setProgress] = useState(0);
+
+  const [stage, setStage] = useState("");
+
+  const [link, setLink] = useState("");
+
+  const [artwork, setArtwork] = useState("");
+
+  const [importing, setImporting] = useState(false);
+
+  const [fetchingLyrics, setFetchingLyrics] = useState(false);
+
+  const [recording, setRecording] = useState(false);
+
+  const [recSecs, setRecSecs] = useState(0);
+
+  const [selectedEngine, setSelectedEngine] = useState<AnalysisEngine>(
+
+    settings.features.tensorflow_analysis ? "tensorflow" : "local",
+
+  );
+
+
+
+  useEffect(() => {
+
+    if (!recording) return;
+
+    const iv = window.setInterval(() => setRecSecs((s) => s + 1), 1000);
+
+    return () => window.clearInterval(iv);
+
+  }, [recording]);
+
+
+
+  useEffect(() => {
+
+    setSelectedEngine((current) => {
+
+      if (current === "tensorflow" && !settings.features.tensorflow_analysis) {
+
+        return "local";
+
+      }
+
+      if (current === "local" && !settings.features.local_analysis) {
+
+        return settings.features.tensorflow_analysis ? "tensorflow" : current;
+
+      }
+
+      return current;
+
+    });
+
+  }, [settings.features.local_analysis, settings.features.tensorflow_analysis]);
+
+
+
+  function onPick(f: File | null) {
+
+    if (!f) return;
+
+    setFile(f);
+
+    const { title: cleanT, artist: cleanA } = parseFileTitleAndArtist(f.name);
+
+    if (cleanT) setTitle(cleanT);
+
+    if (cleanA) setArtist(cleanA);
+
+    toast.success(`Selected "${cleanT}" — tap Detect chords below`);
+
+    setTimeout(() => {
+
+      void grabLyrics(true, cleanT, cleanA);
+
+    }, 200);
+
+  }
+
+
+
+  async function runImport() {
+
+    const rawLink = link.trim();
+
+    if (!rawLink) {
+
+      toast.error("Please paste a YouTube or Spotify link first");
+
+      return;
+
+    }
+
+    setImporting(true);
+
+    setBusy(true);
+
+    setProgress(15);
+
+    setStage("Connecting to server & analyzing full song from link...");
+
+    try {
+
+      toast.info("Downloading track, syncing lyrics, and analyzing entire song with TensorFlow...");
+
+      const res = await backendJson<{
+
+        ok: boolean;
+
+        id: string;
+
+        title: string;
+
+        artist: string;
+
+        artwork: string;
+
+        audioUrl: string;
+
+        lyrics: string;
+
+        syncedLyrics: SyncedLine[];
+
+        analysis: AnalysisResult;
+
+      }>("/api/analyze-link", {
+
+        method: "POST",
+
+        headers: { "content-type": "application/json" },
+
+        body: JSON.stringify({ url: rawLink, language: acrLanguage }),
+
+      });
+
+
+
+      if (!res.ok || !res.analysis) {
+
+        throw new Error("Server failed to analyze the song link.");
+
+      }
+
+
+
+      const cleanTitle = res.title || "Audio Track";
+
+      const cleanArtist = res.artist || "";
+
+      const cleanArtwork = res.artwork || "";
+
+
+
+      setTitle(cleanTitle);
+
+      if (cleanArtist) setArtist(cleanArtist);
+
+      if (cleanArtwork) setArtwork(cleanArtwork);
+
+      if (res.lyrics) setLyrics(res.lyrics);
+
+      if (res.syncedLyrics) setSynced(res.syncedLyrics);
+
+
+
+      setProgress(75);
+
+      setStage("Caching audio and syncing lyrics...");
+
+
+
+      // Download audio blob in background to cache in IndexedDB
+
+      try {
+
+        const audioRes = await backendFetch(res.audioUrl);
+
+        if (audioRes.ok) {
+
+          const blob = await audioRes.blob();
+
+          await putAudio(res.id, blob);
+
+        }
+
+      } catch (cacheErr) {
+
+        console.warn("Could not cache audio locally:", cacheErr);
+
+      }
+
+
+
+      // Transliteration if selected
+
+      let romanized = "";
+
+      if (res.lyrics && res.lyrics.trim() && style !== "english" && settings.features.lyric_romanization) {
+
+        setStage("Transliterating lyrics");
+
+        setProgress(90);
+
+        try {
+
+          const r = await romanizeLyrics({ data: { lyrics: res.lyrics, style } });
+
+          romanized = r.text;
+
+        } catch {
+
+          // ignore
+
+        }
+
+      }
+
+
+
+      setStage("Saving chord sheet");
+
+      setProgress(98);
+
+      saveSong({
+
+        id: res.id,
+
+        title: cleanTitle,
+
+        artist: cleanArtist,
+
+        createdAt: Date.now(),
+
+        analysis: res.analysis,
+
+        lyrics: res.lyrics || "",
+
+        romanized,
+
+        romanizationStyle: style,
+
+        capo: 0,
+
+        transpose: 0,
+
+        notes: `Imported from ${rawLink}`,
+
+        engine: "tensorflow",
+
+        ...(cleanArtwork ? { artwork: cleanArtwork } : {}),
+
+        ...(res.audioUrl ? { audioUrl: res.audioUrl } : {}),
+
+        ...(res.syncedLyrics && res.syncedLyrics.length ? { syncedLyrics: res.syncedLyrics } : {}),
+
+      });
+
+
+
+      setProgress(100);
+
+      toast.success(`Full song analyzed! Opening "${cleanTitle}"...`);
+
+      void navigate({ to: "/song/$id", params: { id: res.id } });
+
+    } catch (e) {
+
+      console.error("Link analysis error:", e);
+
+      const errMsg = e instanceof Error ? e.message : "Could not analyze audio from that link";
+
+      toast.error(`Analysis failed: ${errMsg}`);
+
+    } finally {
+
+      setImporting(false);
+
+      setBusy(false);
+
+      setProgress(0);
+
+      setStage("");
+
+    }
+
+  }
+
+
+
+  async function grabLyrics(
+
+    silent = false,
+
+    lookupTitle?: string,
+
+    lookupArtist?: string,
+
+    durationHint?: number,
+
+  ): Promise<SyncedLine[]> {
+
+    const t = (lookupTitle || title).trim();
+
+    const a = (lookupArtist || artist).trim();
+
+    if (!t) {
+
+      if (!silent) toast.error("Add a title first");
+
+      return [];
+
+    }
+
+    setFetchingLyrics(true);
+
+    try {
+
+      const res = await fetchSyncedLyrics({
+
+        data: { title: t, ...(a ? { artist: a } : {}), ...(durationHint ? { duration: durationHint } : {}) },
+
+      });
+
+      if (res.found && (res.plain || res.synced.length)) {
+
+        setLyrics(res.plain);
+
+        setSynced(res.synced);
+
+        if (!silent) {
+
+          toast.success(
+
+            res.synced.length ? "Found time-synced lyrics" : "Found lyrics (no timings available)",
+
+          );
+
+        }
+
+        return res.synced;
+
+      }
+
+      if (!silent) toast.info("No lyrics found in public catalog. You can paste or type them below.");
+
+      return [];
+
+    } catch {
+
+      if (!silent) toast.error("Lyrics lookup timed out or failed");
+
+      return [];
+
+    } finally {
+
+      setFetchingLyrics(false);
+
+    }
+
+  }
+
+
+
+  async function toggleRecord() {
+
+    if (recording) {
+
+      recorderRef.current?.stop();
+
+      return;
+
+    }
+
+    try {
+
+      const stream = await getMicrophoneStream();
+
+      const rec = new MediaRecorder(stream);
+
+      recorderRef.current = rec;
+
+      const chunks: BlobPart[] = [];
+
+      rec.ondataavailable = (e) => chunks.push(e.data);
+
+      rec.onstop = () => {
+
+        stream.getTracks().forEach((t) => t.stop());
+
+        const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+
+        const f = new File([blob], "recording.webm", { type: blob.type });
+
+        setFile(f);
+
+        setRecording(false);
+
+        if (!title) setTitle("Recording");
+
+        toast.success("Recording captured — tap Detect chords");
+
+      };
+
+      setRecSecs(0);
+
+      rec.start();
+
+      setRecording(true);
+
+    } catch (err) {
+
+      toast.error(err instanceof Error ? err.message : "Microphone access was blocked");
+
+    }
+
+  }
+
+
+
+  async function run(
+
+    overrideFile?: File,
+
+    overrideTitle?: string,
+
+    overrideArtist?: string,
+
+    overrideArtwork?: string,
+
+    overrideSynced?: SyncedLine[],
+
+  ) {
+
+    const targetFile = overrideFile || file;
+
+    if (!targetFile) {
+
+      toast.error("Choose an audio file first");
+
+      return;
+
+    }
+
+    const currentTitle = (overrideTitle || title).trim();
+
+    const currentArtist = (overrideArtist || artist).trim();
+
+    const currentArtwork = (overrideArtwork || artwork).trim();
+
+    const currentSynced = overrideSynced || synced;
+
+
+
+    setBusy(true);
+
+    setProgress(5);
+
+    setStage("Reading audio file...");
+
+    try {
+
+      let duration = 180;
+
+      let decodedBuffer: AudioBuffer | null = null;
+
+      try {
+
+        const ab = await readFileAsArrayBuffer(targetFile);
+
+        const res = await safeDecodeAudio(ab);
+
+        duration = res.duration || 180;
+
+        decodedBuffer = res.buffer;
+
+      } catch (err) {
+
+        console.warn("Could not pre-decode audio:", err);
+
+      }
+
+
+
+      let analysis: AnalysisResult | null = null;
+
+      let engine: "tensorflow" | "local" = "local";
+
+
+
+      if (selectedEngine === "tensorflow" && settings.features.tensorflow_analysis) {
+
+        setStage(`Analysing with your TensorFlow model (${acrLanguage})`);
+
+        setProgress(20);
+
+        const outcome = await analyzeWithTensorFlow(targetFile, duration, acrLanguage);
+
+        if (outcome.ok) {
+
+          analysis = outcome.analysis;
+
+          engine = "tensorflow";
+
+          setProgress(85);
+
+        } else {
+
+          toast.warning(
+
+            settings.features.local_analysis
+
+              ? `${outcome.reason} — analysing on device instead`
+
+              : outcome.reason,
+
+          );
+
+        }
+
+      }
+
+
+
+      if (!analysis && settings.features.local_analysis) {
+
+        if (!decodedBuffer) {
+
+          throw new Error("Could not decode audio on this device for local analysis.");
+
+        }
+
+        setStage("Analysing on device...");
+
+        setProgress(30);
+
+        // Downsample to 22.05 kHz mono for a faster, cleaner chromagram.
+
+        const off = new OfflineAudioContext(
+
+          1,
+
+          Math.ceil((decodedBuffer.duration * 22050) as number),
+
+          22050,
+
+        );
+
+        const src = off.createBufferSource();
+
+        src.buffer = decodedBuffer;
+
+        src.connect(off.destination);
+
+        src.start();
+
+        const mono = await off.startRendering();
+
+
+
+        analysis = await analyzeAudioBuffer(mono, {
+
+          language: acrLanguage,
+
+          onProgress: (p, s) => {
+
+            setProgress(Math.min(85, p * 0.85));
+
+            setStage(s);
+
+          },
+
+        });
+
+      }
+
+      if (!analysis) {
+
+        throw new Error("No analysis engine is available right now.");
+
+      }
+
+
+
+      let lyricText = lyrics;
+
+      let syncedLines = currentSynced;
+
+      if (!lyricText.trim() && currentTitle && settings.features.lyrics_lookup) {
+
+        setStage("Looking up lyrics");
+
+        setProgress(88);
+
+        const found = await grabLyrics(true, currentTitle, currentArtist, duration);
+
+        if (found.length) syncedLines = found;
+
+        lyricText = found.length ? found.map((l) => l.text).join("\n") : lyricText;
+
+      }
+
+
+
+      let romanized = "";
+
+      if (lyricText.trim() && style !== "english" && settings.features.lyric_romanization) {
+
+        setStage("Transliterating lyrics");
+
+        setProgress(93);
+
+        try {
+
+          const res = await romanizeLyrics({ data: { lyrics: lyricText, style } });
+
+          romanized = res.text;
+
+        } catch (e) {
+
+          toast.warning(e instanceof Error ? e.message : "Transliteration skipped");
+
+        }
+
+      }
+
+
+
+      const id = newId();
+
+      setStage("Saving");
+
+      setProgress(97);
+
+      await putAudio(id, targetFile);
+
+      saveSong({
+
+        id,
+
+        title: currentTitle || targetFile.name.replace(/\.[^.]+$/, ""),
+
+        artist: currentArtist,
+
+        createdAt: Date.now(),
+
+        analysis,
+
+        lyrics: lyricText,
+
+        romanized,
+
+        romanizationStyle: style,
+
+        capo: 0,
+
+        transpose: 0,
+
+        notes: "",
+
+        engine,
+
+        ...(currentArtwork ? { artwork: currentArtwork } : {}),
+
+        ...(syncedLines.length ? { syncedLyrics: syncedLines } : {}),
+
+      });
+
+      setProgress(100);
+
+      const usedLang = analysis.language || (acrLanguage !== "auto" ? acrLanguage : "detected");
+
+      toast.success(
+
+        engine === "tensorflow"
+
+          ? `Analysed with TensorFlow (${usedLang} model)`
+
+          : `Analysis complete on device (${usedLang} profile)`,
+
+      );
+
+      void navigate({ to: "/song/$id", params: { id } });
+
+    } catch (e) {
+
+      console.error(e);
+
+      toast.error(e instanceof Error ? e.message : "Could not analyze that file");
+
+    } finally {
+
+      setBusy(false);
+
+    }
+
+  }
+
+
+
+  return (
+
+    <div className="mx-auto max-w-lg px-4 pt-6">
+
+      <h1 className="text-2xl font-semibold tracking-tight">Analyze a song</h1>
+
+      <p className="mt-1 text-sm text-muted-foreground">
+
+        Your TensorFlow chord model runs through the Python API, with ChordMini and on-device
+
+        analysis as fallbacks.
+
+      </p>
+
+
+
+      <div className="panel mt-5 p-4">
+
+        {settings.features.link_import && <>
+
+          <Label htmlFor="link" className="text-sm font-semibold flex items-center gap-2">
+
+            <Link2 className="size-4 text-primary" />
+
+            <span>YouTube, Spotify or Web Audio Link</span>
+
+          </Label>
+
+          <p className="mt-1 text-xs text-muted-foreground">
+
+            Paste any YouTube video, Spotify track, or web audio link. ChordLab will automatically download the full track and directly analyze chords, key, tempo and synced lyrics across the entire song.
+
+          </p>
+
+          <div className="mt-3 flex flex-col sm:flex-row gap-2">
+
+            <Input
+
+              id="link"
+
+              value={link}
+
+              placeholder="https://youtu.be/... or open.spotify.com/track/..."
+
+              onChange={(e) => setLink(e.target.value)}
+
+              onKeyDown={(e) => {
+
+                if (e.key === "Enter") {
+
+                  e.preventDefault();
+
+                  void runImport();
+
+                }
+
+              }}
+
+              className="flex-1 font-mono text-xs"
+
+            />
+
+            <Button
+
+              variant="default"
+
+              onClick={() => void runImport()}
+
+              disabled={importing || busy}
+
+              className="gap-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black font-semibold shadow-md active:scale-95"
+
+            >
+
+              {importing ? <Loader2 className="size-4 animate-spin" /> : <Wand2 className="size-4" />}
+
+              <span>{importing ? "Downloading and Analyzing..." : "Analyze Full Song"}</span>
+
+            </Button>
+
+          </div>
+
+        </>}
+
+        {artwork && (
+
+          <img
+
+            src={artwork}
+
+            alt={`Artwork for ${title || "the imported track"}`}
+
+            loading="lazy"
+
+            className="mt-3 h-24 w-full rounded-lg object-cover"
+
+          />
+
+        )}
+
+        <Button
+
+          variant={recording ? "destructive" : "secondary"}
+
+          className="mt-3 w-full"
+
+          onClick={() => void toggleRecord()}
+
+        >
+
+          {recording ? <Square className="size-4" /> : <Mic className="size-4" />}
+
+          {recording ? `Stop recording (${recSecs}s)` : "Record what's playing"}
+
+        </Button>
+
+      </div>
+
+
+
+      <div className="panel mt-4 p-4">
+
+        <label
+
+          htmlFor="audio-file-input"
+
+          className="relative flex w-full cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-border bg-surface-2/40 px-4 py-8 text-center transition-colors hover:border-primary/60 active:bg-surface-2/70"
+
+        >
+
+          <input
+
+            id="audio-file-input"
+
+            ref={fileRef}
+
+            type="file"
+
+            accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.weba,.webm,audio/mpeg,audio/wav,audio/x-m4a,audio/flac,audio/ogg,*/*"
+
+            className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+
+            onChange={(e) => onPick(e.target.files?.[0] ?? null)}
+
+          />
+
+          {file ? (
+
+            <>
+
+              <Music4 className="size-7 text-primary" />
+
+              <span className="text-sm font-medium">{file.name}</span>
+
+              <span className="text-xs text-muted-foreground">Tap to choose another file</span>
+
+            </>
+
+          ) : (
+
+            <>
+
+              <Upload className="size-7 text-primary" />
+
+              <span className="text-sm font-medium">Choose an audio file</span>
+
+              <span className="text-xs text-muted-foreground">MP3, WAV, M4A, FLAC, OGG</span>
+
+            </>
+
+          )}
+
+        </label>
+
+
+
+        <div className="mt-4 grid grid-cols-2 gap-3">
+
+          <div className="space-y-1.5">
+
+            <Label htmlFor="title">Title</Label>
+
+            <Input id="title" value={title} onChange={(e) => setTitle(e.target.value)} />
+
+          </div>
+
+          <div className="space-y-1.5">
+
+            <Label htmlFor="artist">Artist</Label>
+
+            <Input id="artist" value={artist} onChange={(e) => setArtist(e.target.value)} />
+
+          </div>
+
+        </div>
+
+      </div>
+
+
+
+      <div className="panel mt-4 p-4">
+
+        <div className="flex items-center gap-2">
+
+          <Cpu className="size-4 text-primary" />
+
+          <Label>Analysis engine</Label>
+
+        </div>
+
+        <Select
+
+          value={selectedEngine}
+
+          onValueChange={(v) => setSelectedEngine(v as AnalysisEngine)}
+
+        >
+
+          <SelectTrigger className="mt-2">
+
+            <SelectValue />
+
+          </SelectTrigger>
+
+          <SelectContent>
+
+            {settings.features.tensorflow_analysis && (
+
+              <SelectItem value="tensorflow">Your TensorFlow model · API</SelectItem>
+
+            )}
+
+            {settings.features.local_analysis && (
+
+              <SelectItem value="local">On-device only (offline)</SelectItem>
+
+            )}
+
+          </SelectContent>
+
+        </Select>
+
+        <p className="mt-2 text-xs text-muted-foreground">
+
+          {selectedEngine === "tensorflow"
+
+            ? "Your trained TensorFlow model recognizes chords in the Python API, with on-device analysis as fallback."
+
+            : "Everything runs on your device — your audio never leaves the phone."}
+
+        </p>
+
+
+
+        <div className="mt-4 border-t border-border/60 pt-3">
+
+          <Label className="text-xs font-medium">Musical language &amp; chord profile</Label>
+
+          <Select
+
+            value={acrLanguage}
+
+            onValueChange={(v) => {
+
+              const lang = v as ACRLanguage;
+
+              setAcrLanguage(lang);
+
+              if (lang === "hindi" && style === "auto") setStyle("hinglish");
+
+              else if (lang === "tamil" && style === "auto") setStyle("tanglish");
+
+              else if (lang === "english" && style === "auto") setStyle("english");
+
+            }}
+
+          >
+
+            <SelectTrigger className="mt-1.5">
+
+              <SelectValue />
+
+            </SelectTrigger>
+
+            <SelectContent>
+
+              <SelectItem value="auto">Auto detect (English · Hindi · Tamil)</SelectItem>
+
+              <SelectItem value="english">English · Western pop / rock / classical</SelectItem>
+
+              <SelectItem value="hindi">Hindi · Bollywood / Hindustani raga idioms</SelectItem>
+
+              <SelectItem value="tamil">Tamil · Kollywood / Carnatic &amp; mediant harmony</SelectItem>
+
+            </SelectContent>
+
+          </Select>
+
+          <p className="mt-1.5 text-xs text-muted-foreground">
+
+            Applies specialized chord transition matrices and key profiles to both the TensorFlow model and the in-system engine.
+
+          </p>
+
+        </div>
+
+      </div>
+
+
+
+      <div className="panel mt-4 p-4">
+
+        <div className="flex items-center justify-between gap-2">
+
+          <Label htmlFor="lyrics">Lyrics (optional)</Label>
+
+          {settings.features.lyrics_lookup && <Button
+
+            size="sm"
+
+            variant="secondary"
+
+            onClick={() => void grabLyrics()}
+
+            disabled={fetchingLyrics}
+
+          >
+
+            {fetchingLyrics ? (
+
+              <Loader2 className="size-4 animate-spin" />
+
+            ) : (
+
+              <TextSearch className="size-4" />
+
+            )}
+
+            Generate lyrics (Gemini)
+
+          </Button>}
+
+        </div>
+
+        <p className="mt-1 text-xs text-muted-foreground">
+
+          Fetch time-synced lyrics by title and artist, or paste your own. Add markers like [Verse]
+
+          or [Chorus] to shape the sheet.
+
+        </p>
+
+        <Textarea
+
+          id="lyrics"
+
+          value={lyrics}
+
+          onChange={(e) => {
+
+            setLyrics(e.target.value);
+
+            setSynced([]);
+
+          }}
+
+          rows={7}
+
+          placeholder={"[Verse]\nyour lyric line here\nanother line\n\n[Chorus]\n..."}
+
+          className="mt-2 font-mono text-xs"
+
+        />
+
+        {synced.length > 0 && (
+
+          <p className="mt-2 text-xs text-primary">
+
+            {synced.length} timed lines — chords will align to the exact words.
+
+          </p>
+
+        )}
+
+        <div className="mt-3 space-y-1.5">
+
+          <Label>Transliteration</Label>
+
+          <Select value={style} onValueChange={(v) => setStyle(v as Style)}>
+
+            <SelectTrigger>
+
+              <SelectValue />
+
+            </SelectTrigger>
+
+            <SelectContent>
+
+              <SelectItem value="auto">Auto detect (Hinglish / Tanglish / other)</SelectItem>
+
+              <SelectItem value="hinglish">Hinglish (Hindi in Roman script)</SelectItem>
+
+              <SelectItem value="tanglish">Tanglish (Tamil in Roman script)</SelectItem>
+
+              <SelectItem value="english">None</SelectItem>
+
+            </SelectContent>
+
+          </Select>
+
+        </div>
+
+      </div>
+
+
+
+      {busy && (
+
+        <div className="panel mt-4 p-4">
+
+          <div className="flex items-center gap-2 text-sm">
+
+            <Loader2 className="size-4 animate-spin text-primary" />
+
+            {stage}
+
+          </div>
+
+          <Progress value={progress} className="mt-3" />
+
+        </div>
+
+      )}
+
+
+
+      <Button size="lg" className="mt-5 w-full" onClick={() => void run()} disabled={busy || !file}>
+
+        <Wand2 className="size-4" />
+
+        {busy ? "Analyzing…" : "Detect chords"}
+
+      </Button>
+
+    </div>
+
+  );
+
+}
+
