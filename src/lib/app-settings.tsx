@@ -86,24 +86,46 @@ const AppSettingsContext = createContext<AppSettingsContextValue>({
  *
  * @param children - Child React nodes that will receive the settings context.
  */
+const SETTINGS_CACHE_KEY = "chordlab_cached_app_settings";
+
 export function AppSettingsProvider({ children }: { children: ReactNode }) {
-  const [settings, setSettings] = useState(DEFAULT_APP_SETTINGS);
-  const [ready, setReady] = useState(false);
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    try {
+      const cached = localStorage.getItem(SETTINGS_CACHE_KEY);
+      return cached ? (JSON.parse(cached) as AppSettings) : DEFAULT_APP_SETTINGS;
+    } catch {
+      return DEFAULT_APP_SETTINGS;
+    }
+  });
+  const [ready, setReady] = useState(true);
 
   useEffect(() => {
     let active = true;
-    void backendJson<AppSettings>("/api/public-config")
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 4000);
+
+    void backendJson<AppSettings>("/api/public-config", { signal: controller.signal })
       .then((config) => {
-        if (active) setSettings(config);
+        if (active) {
+          setSettings(config);
+          try {
+            localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(config));
+          } catch {
+            // ignore
+          }
+        }
       })
       .catch((error: unknown) => {
-        console.warn("Could not load app settings", error);
+        console.warn("Could not load app settings (using cached/default):", error);
       })
       .finally(() => {
+        clearTimeout(abortTimer);
         if (active) setReady(true);
       });
     return () => {
       active = false;
+      clearTimeout(abortTimer);
+      controller.abort();
     };
   }, []);
 

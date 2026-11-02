@@ -174,7 +174,7 @@ function AppFrame() {
         />
       )}
 
-      {auth.ready && auth.account ? (
+      {auth.account ? (
         <>
           {/* Top Application Bar with Brand and Top-Right Sign Out Button */}
           <header className="sticky top-0 z-40 flex items-center justify-between border-b border-white/5 bg-background/85 px-4 pt-[max(0.625rem,env(safe-area-inset-top,0px))] pb-2.5 backdrop-blur-xl">
@@ -229,8 +229,9 @@ function AppFrame() {
       ) : auth.ready ? (
         <AuthScreen />
       ) : (
-        <div className="flex min-h-screen items-center justify-center text-muted-foreground">
-          <span className="size-5 animate-spin rounded-full border-2 border-current border-r-transparent" />
+        <div className="flex min-h-screen flex-col items-center justify-center gap-3 text-muted-foreground">
+          <span className="size-6 animate-spin rounded-full border-2 border-primary border-r-transparent" />
+          <p className="text-xs text-muted-foreground/80">Connecting to ChordLab...</p>
         </div>
       )}
     </>

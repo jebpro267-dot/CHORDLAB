@@ -51,8 +51,25 @@ async function submitCredentials(path: string, email: string, password: string) 
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [account, setAccount] = useState<UserAccount | null>(null);
-  const [ready, setReady] = useState(false);
+  const [account, setAccount] = useState<UserAccount | null>(() => {
+    try {
+      const cached = localStorage.getItem(ACCOUNT_KEY);
+      return cached ? (JSON.parse(cached) as UserAccount) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Ready immediately if no token exists OR if an account is already cached locally
+  const [ready, setReady] = useState<boolean>(() => {
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const cached = localStorage.getItem(ACCOUNT_KEY);
+      return !token || !!cached;
+    } catch {
+      return true;
+    }
+  });
 
   useEffect(() => {
     let active = true;
@@ -62,39 +79,51 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const cached = localStorage.getItem(ACCOUNT_KEY);
-    if (cached) {
-      try {
-        if (active) setAccount(JSON.parse(cached) as UserAccount);
-      } catch {
-        localStorage.removeItem(ACCOUNT_KEY);
-      }
-    }
+    // Safety timeout: never let the app remain unready for more than 1.5s
+    const safetyTimer = setTimeout(() => {
+      if (active) setReady(true);
+    }, 1500);
+
+    const controller = new AbortController();
+    const abortTimer = setTimeout(() => controller.abort(), 3500);
 
     void fetch(backendUrl("/api/auth/me"), {
       headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
     })
       .then(async (response) => {
         if (response.status === 401) {
           localStorage.removeItem(TOKEN_KEY);
           localStorage.removeItem(ACCOUNT_KEY);
-          if (active) setAccount(null);
+          if (active) {
+            setAccount(null);
+            setReady(true);
+          }
           return;
         }
-        if (!response.ok) throw new Error("Authentication service is unavailable");
-        const profile = (await response.json()) as UserAccount;
-        localStorage.setItem(ACCOUNT_KEY, JSON.stringify(profile));
-        if (active) setAccount(profile);
+        if (response.ok) {
+          const profile = (await response.json()) as UserAccount;
+          localStorage.setItem(ACCOUNT_KEY, JSON.stringify(profile));
+          if (active) {
+            setAccount(profile);
+            setReady(true);
+          }
+        }
       })
       .catch((error: unknown) => {
-        console.warn("Could not refresh account session", error);
+        console.warn("Could not refresh account session (server asleep or offline):", error);
       })
       .finally(() => {
+        clearTimeout(safetyTimer);
+        clearTimeout(abortTimer);
         if (active) setReady(true);
       });
 
     return () => {
       active = false;
+      clearTimeout(safetyTimer);
+      clearTimeout(abortTimer);
+      controller.abort();
     };
   }, []);
 
