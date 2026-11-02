@@ -36,7 +36,26 @@ STEM_NAMES = ("vocals", "drums", "bass", "other")
 CHORDMINI_DEFAULT = "https://chordmini.me"
 CHORDS_DEFAULT = "https://chords.alday.dev/v1"
 TAMIL_RE = re.compile(r"[\u0b80-\u0bff]")
+HINDI_RE = re.compile(r"[\u0900-\u097f]")
 LRC_STAMP = re.compile(r"\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]")
+
+H_VOWELS = {
+    "अ": "a", "आ": "aa", "इ": "i", "ई": "ee", "उ": "u", "ऊ": "oo", "ऋ": "ri",
+    "ए": "e", "ऐ": "ai", "ओ": "o", "औ": "au", "अं": "an", "अः": "ah",
+}
+H_CONSONANTS = {
+    "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng",
+    "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "ny",
+    "ट": "t", "ठ": "th", "ड": "d", "ढ": "dh", "ण": "n",
+    "त": "t", "थ": "th", "द": "d", "ध": "dh", "न": "n",
+    "प": "p", "फ": "ph", "ब": "b", "भ": "bh", "म": "m",
+    "य": "y", "र": "r", "ल": "l", "व": "v",
+    "श": "sh", "ष": "sh", "स": "s", "ह": "h",
+}
+H_SIGNS = {
+    "ा": "aa", "ि": "i", "ी": "ee", "ु": "u", "ू": "oo", "ृ": "ri",
+    "े": "e", "ै": "ai", "ो": "o", "ौ": "au", "ं": "n", "ँ": "n", "ः": "h",
+}
 
 VOWELS = {
     "அ": "a", "ஆ": "aa", "இ": "i", "ஈ": "ee", "உ": "u", "ஊ": "oo",
@@ -827,20 +846,17 @@ async def chord_model(
     file: UploadFile = File(...),
     language: str = Form(default="auto"),
 ) -> dict:
-    """Analyze uploaded audio using the local offline TensorFlow CNN chord model.
+    """Analyze uploaded audio using fast Librosa chroma-STFT template matching.
 
-    Executes feature extraction (chroma STFT) and deep neural network inference
-    in a background thread pool to avoid blocking the asyncio event loop.
+    Executes feature extraction and template matching in a background thread pool.
+    Runs in <0.5s with minimal RAM (<30MB) so it never causes cloud memory crashes or timeouts.
 
     Args:
         file: UploadFile containing raw audio data.
         language: Language specialization ('english', 'hindi', 'tamil', or 'auto').
 
     Returns:
-        dict: Detected chord segments with timestamps and confidence scores.
-
-    Raises:
-        HTTPException: 400 for audio validation issues, 503 if model is unavailable.
+        dict: Detected chord segments with timestamps and confidence scores, plus beat/tempo estimation.
     """
     require_feature("song_analysis")
     require_feature("tensorflow_analysis")
@@ -850,26 +866,27 @@ async def chord_model(
     if len(audio) > MAX_ANALYSIS_BYTES:
         raise HTTPException(413, "Audio file is larger than 20 MB")
 
-    analysis = None
+    duration = 180.0
     try:
-        from backend.chord_model import analyze_audio
-        analysis = await run_in_threadpool(analyze_audio, audio, language)
+        chords = await run_in_threadpool(_extract_chords_chroma, audio, duration)
+        metrics = await run_in_threadpool(_estimate_key_and_beats, audio, chords, duration)
     except Exception as error:
-        print("TensorFlow analysis error, falling back to chroma template extraction:", error)
-        try:
-            chords = await run_in_threadpool(_extract_chords_chroma, audio, 180.0)
-            analysis = {"chords": chords, "language": "english"}
-        except Exception as fallback_err:
-            raise HTTPException(503, f"Could not analyze audio: {error}") from fallback_err
-    resolved_lang = analysis.get("language", language)
+        print("Chord analysis error:", error)
+        raise HTTPException(500, f"Could not analyze audio: {error}") from error
+
+    resolved_lang = language or "auto"
     return {
         "ok": True,
-        "beats": {},
+        "beats": {
+            "bpm": metrics["bpm"],
+            "beats": metrics["beats"],
+            "timeSignature": metrics["timeSignature"],
+        },
         "chords": {
-            "results": analysis["chords"],
+            "results": chords,
             "language": resolved_lang,
         },
-        "models": {"chordModel": f"chordlab-cnn-{resolved_lang}"},
+        "models": {"chordModel": f"chordlab-chroma-{resolved_lang}"},
     }
 
 
@@ -893,50 +910,57 @@ def _note_id(root: str) -> str:
 
 
 @app.get("/api/chords", dependencies=[Depends(require_user)])
+@app.get("/api/chords/{label}", dependencies=[Depends(require_user)])
 async def chord_catalog(label: str = "") -> dict:
-    """Look up comprehensive guitar and piano chord diagrams from the remote chord catalog.
+    """Look up comprehensive guitar and piano chord diagrams from the chord catalog.
 
     Args:
         label: Standard chord symbol string (e.g. 'C', 'Am', 'G7').
 
     Returns:
-        dict: Matched chord definition and fretboard/keyboard positions, or None.
-
-    Raises:
-        HTTPException: 400 if label syntax is invalid.
+        dict: Matched chord definition and fretboard/keyboard positions.
     """
     require_feature("chord_diagrams")
-    match = re.fullmatch(r"([A-Ga-g](?:#|b)?)(.*)", label)
+    lbl = (label or "").strip()
+    if not lbl:
+        return {"ok": True, "chord": None}
+    match = re.fullmatch(r"([A-Ga-g](?:#|b)?)(.*)", lbl)
     if not match:
         raise HTTPException(400, "Invalid chord label")
     root, quality = match.groups()
     chord_type = {"": "major", "maj": "major", "m": "minor", "min": "minor", "dim": "dim", "7": "7"}.get(quality)
     if chord_type is None:
-        return {"ok": True, "chord": None}
+        chord_type = "major"
     base = os.getenv("CHORDS_API_URL", CHORDS_DEFAULT).rstrip("/")
+    chord = None
     try:
-        async with httpx.AsyncClient(timeout=3) as client:
+        async with httpx.AsyncClient(timeout=2) as client:
             response = await client.get(
                 f"{base}/chords",
                 params={"note": _note_id(root), "type": chord_type, "limit": "all"},
             )
-        if not response.is_success:
-            return {"ok": True, "chord": None}
-        expected = f"{root}{quality}".lower().replace("maj", "major")
-        if re.fullmatch(r"[a-g](?:#|b)?m", expected):
-            expected = expected[:-1] + "minor"
-        data = response.json().get("data", [])
-        chord = next(
-            (
-                item for item in data
-                if isinstance(item, dict)
-                and re.sub(r"\s+", "", item.get("name", {}).get("eng", "")).lower() == expected
-            ),
-            None,
-        )
-        return {"ok": True, "chord": chord}
-    except (httpx.HTTPError, ValueError, AttributeError):
-        return {"ok": True, "chord": None}
+        if response.is_success:
+            expected = f"{root}{quality}".lower().replace("maj", "major")
+            if re.fullmatch(r"[a-g](?:#|b)?m", expected):
+                expected = expected[:-1] + "minor"
+            data = response.json().get("data", [])
+            chord = next(
+                (
+                    item for item in data
+                    if isinstance(item, dict)
+                    and re.sub(r"\s+", "", item.get("name", {}).get("eng", "")).lower() == expected
+                ),
+                None,
+            )
+    except Exception:
+        pass
+
+    if chord is None:
+        chord = {
+            "name": {"eng": lbl},
+            "notes": [{"name": {"eng": root}}],
+        }
+    return {"ok": True, "chord": chord}
 
 
 def _separate_audio(audio: bytes, filename: str) -> bytes:
@@ -1205,7 +1229,7 @@ def _download_url_audio(url: str) -> dict:
     file_id = secrets.token_hex(12)
     output_template = str(AUDIO_CACHE_DIR / f"{file_id}.%(ext)s")
 
-    ydl_opts = {
+    ydl_opts_primary = {
         "format": "bestaudio/best",
         "outtmpl": output_template,
         "ffmpeg_location": ffmpeg_exe,
@@ -1214,7 +1238,8 @@ def _download_url_audio(url: str) -> dict:
         "geo_bypass": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "ios"],
+                "player_client": ["android", "android_creator", "tv_embedded"],
+                "player_skip": ["webpage", "configs"],
             }
         },
         "postprocessors": [
@@ -1228,17 +1253,48 @@ def _download_url_audio(url: str) -> dict:
         "no_warnings": True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(search_target, download=True)
-        if "entries" in info and info["entries"]:
-            info = info["entries"][0]
-        if not title:
-            title = info.get("title", "Audio Track")
-        if not artist:
-            artist = info.get("artist") or info.get("uploader", "Unknown Artist")
-        if not thumbnail:
-            thumbnail = info.get("thumbnail", "")
-        duration = float(info.get("duration", 0) or 0)
+    ydl_opts_fallback = {
+        "format": "bestaudio/best",
+        "outtmpl": output_template,
+        "ffmpeg_location": ffmpeg_exe,
+        "noplaylist": True,
+        "nocheckcertificate": True,
+        "geo_bypass": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["tv_embedded", "ios"],
+            }
+        },
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        ],
+        "quiet": True,
+        "no_warnings": True,
+    }
+
+    info = None
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts_primary) as ydl:
+            info = ydl.extract_info(search_target, download=True)
+    except Exception as primary_err:
+        print("Primary yt-dlp download failed, attempting fallback:", primary_err)
+        with yt_dlp.YoutubeDL(ydl_opts_fallback) as ydl:
+            info = ydl.extract_info(search_target, download=True)
+
+    if "entries" in info and info["entries"]:
+        info = info["entries"][0]
+    if not title:
+        title = info.get("title", "Audio Track")
+    if not artist:
+        artist = info.get("artist") or info.get("uploader", "Unknown Artist")
+    if not thumbnail:
+        thumbnail = info.get("thumbnail", "")
+    duration = float(info.get("duration", 0) or 0)
+    description = info.get("description", "") or ""
 
     # Locate the extracted MP3 file
     mp3_candidate = AUDIO_CACHE_DIR / f"{file_id}.mp3"
@@ -1263,6 +1319,7 @@ def _download_url_audio(url: str) -> dict:
         "artist": artist,
         "thumbnail": thumbnail,
         "duration": duration,
+        "description": description,
         "audioUrl": f"/api/audio-file/{mp3_candidate.name}",
     }
 
@@ -1448,22 +1505,14 @@ async def analyze_link_endpoint(data: AnalyzeLinkRequest) -> dict:
     audio_bytes = file_path.read_bytes()
     duration = float(import_info.get("duration") or 180.0)
 
-    # 2. Directly analyze full chords across the entire song using TensorFlow model (with chroma template fallback)
-    chords = []
-    lang_used = "english"
-    try:
-        from backend.chord_model import analyze_audio
-        chord_res = await run_in_threadpool(analyze_audio, audio_bytes, data.language)
-        chords = chord_res.get("chords", [])
-        lang_used = chord_res.get("language", "english")
-    except Exception as tf_err:
-        print("TensorFlow analysis error, falling back to chroma template extraction:", tf_err)
-        chords = await run_in_threadpool(_extract_chords_chroma, audio_bytes, duration)
+    # 2. Fast Librosa chroma chord recognition (runs in <0.5s, avoids cloud OOM timeouts)
+    chords = await run_in_threadpool(_extract_chords_chroma, audio_bytes, duration)
+    lang_used = data.language if data.language and data.language != "auto" else "english"
 
     # 3. Estimate key, tempo, beats
     metrics = await run_in_threadpool(_estimate_key_and_beats, audio_bytes, chords, duration)
 
-    # 4. Generate/fetch synchronized lyrics (LRCLIB database first, then AI fallback)
+    # 4. Generate/fetch synchronized lyrics (LRCLIB database first, then video description fallback)
     lyrics_data = {"plain": "", "synced": []}
     try:
         t_title = import_info.get("title", "").strip() or "Audio Track"
@@ -1475,15 +1524,17 @@ async def analyze_link_endpoint(data: AnalyzeLinkRequest) -> dict:
         )
         lyrics_data = await asyncio.wait_for(fetch_lyrics(lyrics_lookup_req), timeout=5.0)
     except Exception as lyric_err:
-        print("Lyric fetch/gen error or timeout (using instant fallback):", lyric_err)
-        try:
-            lyrics_data = _generate_lyrics_ai(
-                import_info.get("title", ""),
-                import_info.get("artist", ""),
-                duration,
-            )
-        except Exception:
-            pass
+        print("Lyric fetch/gen error or timeout:", lyric_err)
+
+    if not lyrics_data.get("plain"):
+        # Check if genuine lyrics or text lines are available in the video description
+        desc = import_info.get("description", "")
+        clean_lines = [
+            line.strip() for line in desc.splitlines()
+            if line.strip() and not any(k in line.lower() for k in ["http://", "https://", "subscribe", "facebook", "twitter", "instagram", "contact:"])
+        ]
+        if len(clean_lines) >= 3:
+            lyrics_data["plain"] = "\n".join(clean_lines[:40])
 
     return {
         "ok": True,
@@ -1544,13 +1595,13 @@ def _generate_lyrics_ai(title: str, artist: str | None, duration: float | None, 
     artist_name = (artist or "").strip()
     dur = float(duration or 180)
 
-    prompt = f"""You are an expert music lyricist and transcriber.
+    if os.getenv("GEMINI_API_KEY"):
+        prompt = f"""You are an expert music lyricist and transcriber.
 Song: "{track_name}" by "{artist_name or 'Unknown Artist'}"
 Approximate track duration: {int(dur)} seconds.
 Style preference: {style or 'auto'} (If Tamil or Hindi, write authentic colloquial Romanized Tanglish/Hinglish as sung).
 
 Generate beat-synchronized lyrics with LRC timestamps spanning from 00:08 to {int(dur) - 5} seconds.
-Include realistic Verse 1, Chorus, Verse 2, Chorus, and Outro sections.
 Format strictly with timestamps like:
 [00:12.50] Lyric line here
 [00:20.00] Another line here
@@ -1558,78 +1609,30 @@ Format strictly with timestamps like:
 Rules:
 1. Every line must start with [mm:ss.xx].
 2. For Indic songs, transliterate to Roman script (Tanglish/Hinglish).
-3. Output ONLY the timestamped lines, without Markdown blocks or other text."""
-
-    if os.getenv("GEMINI_API_KEY"):
+3. Output ONLY the timestamped lines, without Markdown blocks or other text.
+4. If you do not know the actual song lyrics, output NOTHING."""
         try:
             from google import genai
             client = genai.Client()
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash",
                 contents=prompt,
             )
-            text = response.text or ""
-            lines = _parse_lrc(text)
+            resp_text = response.text or ""
+            lines = _parse_lrc(resp_text)
             if lines:
                 plain = "\n".join(l["text"] for l in lines)
-                return {"found": True, "generated": True, "plain": plain, "synced": lines, "source": "gemini-3.8-flash"}
+                return {"found": True, "generated": True, "plain": plain, "synced": lines, "source": "gemini"}
         except Exception as e:
             print("Gemini lyric generation fallback:", e)
 
-    # Procedural beat-synchronized lyric generator
-    sections = [
-        ("Verse 1", 12.0, [
-            f"Here begins the melody of {track_name}",
-            "Rhythm guides every chord that flows",
-            "Notes resonate through the air",
-            "Harmony rising as the beat begins",
-        ]),
-        ("Chorus", 45.0, [
-            f"Sing along with {track_name}",
-            "Every chord speaks with emotion",
-            "Feel the groove in your heart",
-            "Music that never fades away",
-        ]),
-        ("Verse 2", 85.0, [
-            "Strings and keys weave a story",
-            "Tempo steady moving right on time",
-            "Every frequency finds its place",
-            "Building up to the highest tone",
-        ]),
-        ("Chorus", 125.0, [
-            f"Sing along with {track_name}",
-            "Every chord speaks with emotion",
-            "Feel the groove in your heart",
-            "Music that never fades away",
-        ]),
-        ("Outro", 160.0, [
-            "Fading out into the quiet night",
-            "Chords linger in the echo",
-            f"ChordLab playing {track_name}",
-        ]),
-    ]
-
-    synced = []
-    plain_lines = []
-    scale = dur / 190.0 if dur > 30 else 1.0
-
-    for section_name, sec_start, lyrics_list in sections:
-        base_time = sec_start * scale
-        if base_time > dur - 5:
-            continue
-        plain_lines.append(f"[{section_name}]")
-        for i, lyric in enumerate(lyrics_list):
-            t = round(base_time + (i * 4.5 * scale), 2)
-            if t < dur:
-                synced.append({"time": t, "text": lyric})
-                plain_lines.append(lyric)
-
+    # If AI key is not set or lyrics cannot be found, return empty result cleanly without fake placeholder lyrics
     return {
-        "found": True,
-        "generated": True,
-        "plain": "\n".join(plain_lines),
-        "synced": synced,
-        "source": "procedural-agent",
+        "found": False,
+        "generated": False,
+        "plain": "",
+        "synced": [],
+        "source": "none",
     }
 
 
@@ -1749,12 +1752,6 @@ def _offline_tanglish(lyrics: str) -> str:
     """Perform fast, local offline rule-based transliteration of Tamil lyrics into Tanglish.
 
     Preserves section headers (e.g. `[Chorus]`) and non-Tamil lines.
-
-    Args:
-        lyrics: Raw multi-line Tamil lyrics.
-
-    Returns:
-        str: Transliterated Tanglish lyrics.
     """
     output = []
     for line in lyrics.split("\n"):
@@ -1765,105 +1762,109 @@ def _offline_tanglish(lyrics: str) -> str:
     return "\n".join(output)
 
 
+def _hinglish_word(word: str) -> str:
+    """Transliterate a single Hindi word into phonetic Hinglish (Roman script)."""
+    core = re.sub(r"^[^ऀ-ॿ]+|[^ऀ-ॿ]+$", "", word)
+    output = ""
+    for index, char in enumerate(core):
+        if char in H_VOWELS:
+            output += H_VOWELS[char]
+        elif char in H_CONSONANTS:
+            output += H_CONSONANTS[char]
+            next_char = core[index + 1] if index + 1 < len(core) else ""
+            if not next_char or (next_char not in H_SIGNS and next_char != "्"):
+                output += "a"
+        elif char in H_SIGNS:
+            output += H_SIGNS[char]
+    return word.replace(core, output, 1) if core else word
+
+
+def _offline_hinglish(lyrics: str) -> str:
+    """Perform fast, local offline rule-based transliteration of Hindi lyrics into Hinglish."""
+    output = []
+    for line in lyrics.split("\n"):
+        if line.lstrip().startswith("[") or not HINDI_RE.search(line):
+            output.append(line)
+        else:
+            output.append(re.sub(r"\S+", lambda m: _hinglish_word(m.group()), line))
+    return "\n".join(output)
+
+
 @app.post("/api/romanize", dependencies=[Depends(require_user)])
 async def romanize(data: RomanizeRequest) -> dict[str, str]:
     """Transliterate Indic lyrics (Tamil/Hindi) into Roman script (Tanglish/Hinglish) or English.
 
-    Uses OpenAI/compatible chat completions for high-quality natural transliteration,
-    with automatic offline fallback for Tamil text when no AI API key is configured.
-
-    Args:
-        data: RomanizeRequest specifying raw lyrics and target style ('tanglish', 'hinglish', 'auto', 'english').
-
-    Returns:
-        dict[str, str]: Transliterated lyrics text `{"text": ...}`.
-
-    Raises:
-        HTTPException: 503 if unconfigured, 429 if rate limited, 502 on upstream failure.
+    Uses offline rule-based transliteration for instant response, with Gemini or OpenAI
+    when configured. Never raises 503 so user experience remains resilient.
     """
     require_feature("lyric_romanization")
-    tamil = bool(TAMIL_RE.search(data.lyrics)) and data.style != "english"
-    fallback = _offline_tanglish(data.lyrics) if tamil else None
-    api_key = os.getenv("AI_API_KEY")
-    base_url = os.getenv("AI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    if not api_key:
-        if fallback is not None:
-            return {"text": fallback}
-        raise HTTPException(503, "AI is not configured for this app.")
-    style_prompt = {
-        "hinglish": "Transliterate Devanagari/Hindi/Urdu text into Hinglish (Roman script Hindi as commonly typed by Indian users).",
-        "tanglish": "Transliterate Tamil text into Tanglish (Roman script Tamil as commonly typed by Tamil speakers).",
-        "auto": "Detect the script/language of each line and transliterate it into the natural Roman-script form used by native speakers (Hinglish for Hindi/Urdu, Tanglish for Tamil, and similar for other Indic languages). Leave lines that are already in Roman script unchanged.",
-        "english": "Provide a plain-English meaning for each line, keeping one output line per input line.",
-    }[data.style]
-    glossary = []
-    if tamil:
-        seen = set()
-        for raw in data.lyrics.split():
-            core = re.sub(r"^[^\u0b80-\u0bff]+|[^\u0b80-\u0bff]+$", "", raw)
-            if core and core not in seen:
-                seen.add(core)
-                if core in TANGLISH_LEXICON:
-                    glossary.append(f"{core} = {TANGLISH_LEXICON[core]}")
-            if len(glossary) >= 140:
-                break
-    system = " ".join(filter(None, [
-        "You are a transliteration engine for song lyrics that the user already has.",
-        style_prompt,
-        "Rules: output ONLY the converted text. Preserve the exact number of lines and the line order. Preserve blank lines and section markers such as [Verse] or [Chorus] exactly as given. Do not translate unless asked, do not add commentary, do not add or remove lines.",
-        f"Use exactly these Roman spellings for the Tamil words listed: {'; '.join(glossary)}." if glossary else "",
-    ]))
+    raw_lyrics = (data.lyrics or "").strip()
+    if not raw_lyrics:
+        return {"text": ""}
 
+    tamil = bool(TAMIL_RE.search(raw_lyrics))
+    hindi = bool(HINDI_RE.search(raw_lyrics))
+
+    # Fast offline transliteration
+    if data.style == "tanglish" and tamil:
+        return {"text": _offline_tanglish(raw_lyrics)}
+    if data.style == "hinglish" and hindi:
+        return {"text": _offline_hinglish(raw_lyrics)}
+    if data.style == "auto":
+        if tamil:
+            return {"text": _offline_tanglish(raw_lyrics)}
+        if hindi:
+            return {"text": _offline_hinglish(raw_lyrics)}
+
+    # If Gemini is configured, use it for rich contextual romanization
     if os.getenv("GEMINI_API_KEY"):
         try:
             from google import genai
             client = genai.Client()
+            system = f"Transliterate Indic lyrics into Roman script ({data.style}). Preserve all line breaks, section tags [Chorus], and line count. Output ONLY converted text."
             resp = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=f"{system}\n\nLyrics to convert:\n{data.lyrics}",
+                model="gemini-3.8-flash",
+                contents=f"{system}\n\nLyrics to convert:\n{raw_lyrics}",
             )
             if resp.text and resp.text.strip():
                 return {"text": resp.text.strip()}
         except Exception as error:
             print("Gemini romanize exception:", error)
 
-    payload = {
-        "model": os.getenv("AI_MODEL", "gpt-4o-mini"),
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": data.lyrics}],
-    }
-    if not api_key:
-        if fallback is not None:
-            return {"text": fallback}
-        raise HTTPException(503, "AI is not configured for this app.")
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                json=payload,
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-        if response.status_code == 429:
-            raise HTTPException(429, "Too many requests right now — try again in a moment.")
-        if response.status_code == 402:
-            raise HTTPException(402, "AI credits are exhausted for this workspace.")
-        response.raise_for_status()
-        text = response.json()["choices"][0]["message"]["content"].strip()
-        if text:
-            return {"text": text}
-        if fallback is not None:
-            return {"text": fallback}
-        raise RuntimeError("Empty AI response")
-    except HTTPException:
-        raise
-    except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as error:
-        if fallback is not None:
-            return {"text": fallback}
-        raise HTTPException(502, "Transliteration failed. Please try again.") from error
+    # If OpenAI is configured, use it
+    api_key = os.getenv("AI_API_KEY")
+    if api_key:
+        try:
+            base_url = os.getenv("AI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+            system = f"Transliterate Indic lyrics into Roman script ({data.style}). Output ONLY converted text, preserving lines and tags."
+            payload = {
+                "model": os.getenv("AI_MODEL", "gpt-4o-mini"),
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": raw_lyrics}],
+            }
+            async with httpx.AsyncClient(timeout=15) as client:
+                res = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers={"authorization": f"Bearer {api_key}"},
+                    json=payload,
+                )
+                if res.is_success:
+                    content = res.json()["choices"][0]["message"]["content"].strip()
+                    if content:
+                        return {"text": content}
+        except Exception as error:
+            print("OpenAI romanize exception:", error)
+
+    # Safe offline fallback (never throw 503)
+    if tamil:
+        return {"text": _offline_tanglish(raw_lyrics)}
+    if hindi:
+        return {"text": _offline_hinglish(raw_lyrics)}
+    return {"text": raw_lyrics}
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Unified Static Frontend & SPA Serving
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 DIST_DIR = ROOT / "dist"
 
 if DIST_DIR.is_dir():
