@@ -1687,7 +1687,7 @@ async def fetch_lyrics(data: LyricsLookup) -> dict:
         params["artist_name"] = data.artist.strip()
     try:
         async with httpx.AsyncClient(
-            timeout=10,
+            timeout=3.0,
             headers={"accept": "application/json", "user-agent": "ChordLab (chord sheet app)"},
         ) as client:
             response = await client.get("https://lrclib.net/api/search", params=params)
