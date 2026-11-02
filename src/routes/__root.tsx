@@ -118,7 +118,13 @@ function RootComponent() {
       <AuthProvider>
         <AppSettingsProvider>
           <AppFrame />
-          <Toaster position="top-center" richColors offset="max(env(safe-area-inset-top, 0px), 36px)" />
+          <Toaster
+            position="top-center"
+            richColors
+            offset="36px"
+            mobileOffset="36px"
+            className="z-[999999]"
+          />
         </AppSettingsProvider>
       </AuthProvider>
     </QueryClientProvider>

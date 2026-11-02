@@ -155,7 +155,7 @@ function SongPage() {
   const slug = (song.title || "chord-sheet").toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
   return (
-    <div className="mx-auto max-w-lg px-4 pt-4">
+    <div className="mx-auto max-w-lg px-4 pt-[max(1rem,env(safe-area-inset-top,0px))]">
       <div className="flex items-center justify-between">
         <Button variant="ghost" size="sm" asChild>
           <Link to="/">

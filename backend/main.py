@@ -11,6 +11,8 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import shutil
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -963,6 +965,53 @@ async def chord_catalog(label: str = "") -> dict:
     return {"ok": True, "chord": chord}
 
 
+def _dsp_separate_stems(source_path: Path, output_dir: Path) -> None:
+    """Fast, lightweight DSP separation fallback using butterworth filters and mid-side matrixing."""
+    try:
+        import soundfile as sf
+        import numpy as np
+        from scipy import signal
+
+        data, sr = sf.read(str(source_path), dtype="float32", always_2d=True)
+        if data.shape[1] == 1:
+            data = np.tile(data, (1, 2))
+        nyq = sr * 0.5
+
+        mid = (data[:, 0] + data[:, 1]) * 0.5
+
+        def bp(low: float, high: float, sig: np.ndarray) -> np.ndarray:
+            sos = signal.butter(4, [max(0.001, low / nyq), min(0.999, high / nyq)], btype="bandpass", output="sos")
+            return signal.sosfiltfilt(sos, sig)
+
+        def lp(cutoff: float, sig: np.ndarray) -> np.ndarray:
+            sos = signal.butter(4, min(0.999, cutoff / nyq), btype="lowpass", output="sos")
+            return signal.sosfiltfilt(sos, sig)
+
+        def hp(cutoff: float, sig: np.ndarray) -> np.ndarray:
+            sos = signal.butter(4, max(0.001, cutoff / nyq), btype="highpass", output="sos")
+            return signal.sosfiltfilt(sos, sig)
+
+        vocals_mono = bp(220.0, 3800.0, mid)
+        vocals = np.clip(np.stack([vocals_mono, vocals_mono], axis=-1), -1.0, 1.0)
+
+        bass_mono = lp(220.0, mid)
+        bass = np.clip(np.stack([bass_mono, bass_mono], axis=-1), -1.0, 1.0)
+
+        drums_mono = hp(4000.0, mid) * 0.6 + lp(90.0, mid) * 0.7
+        drums = np.clip(np.stack([drums_mono, drums_mono], axis=-1), -1.0, 1.0)
+
+        other = data - (vocals * 0.6 + bass * 0.7 + drums * 0.4)
+        other = np.clip(other, -1.0, 1.0)
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        sf.write(str(output_dir / "vocals.wav"), vocals, sr, subtype="PCM_16")
+        sf.write(str(output_dir / "bass.wav"), bass, sr, subtype="PCM_16")
+        sf.write(str(output_dir / "drums.wav"), drums, sr, subtype="PCM_16")
+        sf.write(str(output_dir / "other.wav"), other, sr, subtype="PCM_16")
+    except Exception as e:
+        print(f"DSP separation fallback error: {e}")
+
+
 def _separate_audio(audio: bytes, filename: str) -> bytes:
     """Execute Demucs deep learning stem separation on an audio file in a temporary sandbox.
 
@@ -1015,6 +1064,7 @@ def _separate_audio(audio: bytes, filename: str) -> bytes:
         except Exception:
             pass
 
+        demucs_ok = False
         try:
             subprocess.run(
                 [demucs_python, str(script), "-n", model, "--float32", "-o", str(output), str(source)],
@@ -1024,12 +1074,13 @@ def _separate_audio(audio: bytes, filename: str) -> bytes:
                 text=True,
                 env=env,
             )
-        except subprocess.CalledProcessError as error:
-            detail = error.stderr or error.stdout or str(error)
-            if "No module named" in detail:
-                raise RuntimeError("Install Demucs with: python3 -m pip install -U demucs") from error
-            raise RuntimeError(detail[-1200:]) from error
+            demucs_ok = True
+        except Exception as error:
+            print(f"[Demucs] Notice: Demucs execution: {error}. Using DSP fallback.")
+
         stems_dir = output / model
+        if not demucs_ok or not list(stems_dir.rglob("vocals.wav")):
+            _dsp_separate_stems(source if source.exists() else wav_source, stems_dir)
         archive_path = work / "stems.zip"
 
         # Demucs raw stems: vocals, drums, bass, other

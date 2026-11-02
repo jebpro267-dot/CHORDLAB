@@ -6,6 +6,7 @@ import android.os.Bundle;
 import android.webkit.PermissionRequest;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.WindowCompat;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebChromeClient;
 
@@ -14,7 +15,13 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        setTheme(R.style.AppTheme_NoActionBar);
         super.onCreate(savedInstanceState);
+
+        // Ensure system status bar and navigation bar never overlap the WebView content
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
+        getWindow().setStatusBarColor(android.graphics.Color.parseColor("#1b1e26"));
+        getWindow().setNavigationBarColor(android.graphics.Color.parseColor("#1b1e26"));
 
         // Ensure runtime audio permissions are requested on startup
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
@@ -42,4 +49,3 @@ public class MainActivity extends BridgeActivity {
         }
     }
 }
-
