@@ -1641,6 +1641,24 @@ async def serve_audio_file(file_name: str):
     )
 
 
+def _clean_track_and_artist(raw_title: str, raw_artist: str | None = None) -> tuple[str, str]:
+    """Clean noisy titles, remove tags, and split 'Artist - Title' if combined in single field."""
+    title = (raw_title or "").strip()
+    artist = (raw_artist or "").strip()
+    title = re.sub(r"\.(mp3|wav|flac|ogg|m4a|aac|webm)$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"--?\s*(slowed|reverb|reverbed|remix|official|video|audio|lyrics|256k|320k|8d).*$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*[\(\[](official|video|audio|lyrics|remix|hd|4k|hq|visualizer)[^\)\]]*[\)\]]", "", title, flags=re.IGNORECASE)
+    title = title.strip(" -_")
+    if not artist:
+        for sep in (" - ", " – ", " — "):
+            if sep in title:
+                parts = title.split(sep, 1)
+                artist = parts[0].strip()
+                title = parts[1].strip()
+                break
+    return title.strip(), artist.strip()
+
+
 class GenerateLyricsRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     artist: str | None = Field(default=None, max_length=200)
@@ -1649,69 +1667,53 @@ class GenerateLyricsRequest(BaseModel):
 
 
 def _generate_lyrics_ai(title: str, artist: str | None, duration: float | None, style: str | None = "auto") -> dict:
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        return {"found": False, "plain": "", "synced": [], "source": "none"}
+
     track_name = title.strip()
     artist_name = (artist or "").strip()
     dur = float(duration or 180)
+    prompt = f"""Generate synchronized lyrics with timestamps [mm:ss.xx] for:
+\"{track_name}\" by \"{artist_name or 'Unknown Artist'}\"
+Approximate duration: {int(dur)} seconds.
+Output only lines formatted like:
+[00:10.00] lyric line here
+[00:15.00] next lyric line"""
 
-    if os.getenv("GEMINI_API_KEY"):
-        prompt = f"""You are an expert music lyricist and transcriber.
-Song: "{track_name}" by "{artist_name or 'Unknown Artist'}"
-Approximate track duration: {int(dur)} seconds.
-Style preference: {style or 'auto'} (If Tamil or Hindi, write authentic colloquial Romanized Tanglish/Hinglish as sung).
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={key}"
+        with httpx.Client(timeout=3.5) as client:
+            resp = client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    text = "".join(p.get("text", "") for p in parts)
+                    lines = _parse_lrc(text)
+                    if lines:
+                        plain = "\n".join(l["text"] for l in lines)
+                        return {"found": True, "generated": True, "plain": plain, "synced": lines, "source": "gemini"}
+    except Exception as e:
+        print(f"[Gemini] Lyric generation error: {e}")
 
-Generate beat-synchronized lyrics with LRC timestamps spanning from 00:08 to {int(dur) - 5} seconds.
-Format strictly with timestamps like:
-[00:12.50] Lyric line here
-[00:20.00] Another line here
-
-Rules:
-1. Every line must start with [mm:ss.xx].
-2. For Indic songs, transliterate to Roman script (Tanglish/Hinglish).
-3. Output ONLY the timestamped lines, without Markdown blocks or other text.
-4. If you do not know the actual song lyrics, output NOTHING."""
-        try:
-            from google import genai
-            client = genai.Client()
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
-            )
-            resp_text = response.text or ""
-            lines = _parse_lrc(resp_text)
-            if lines:
-                plain = "\n".join(l["text"] for l in lines)
-                return {"found": True, "generated": True, "plain": plain, "synced": lines, "source": "gemini"}
-        except Exception as e:
-            print("Gemini lyric generation fallback:", e)
-
-    # If AI key is not set or lyrics cannot be found, return empty result cleanly without fake placeholder lyrics
-    return {
-        "found": False,
-        "generated": False,
-        "plain": "",
-        "synced": [],
-        "source": "none",
-    }
+    return {"found": False, "plain": "", "synced": [], "source": "none"}
 
 
 @app.post("/api/generate-lyrics", dependencies=[Depends(require_user)])
 async def generate_lyrics_endpoint(data: GenerateLyricsRequest) -> dict:
     require_feature("lyrics_lookup")
-    return await run_in_threadpool(_generate_lyrics_ai, data.title, data.artist, data.duration, data.style)
+    try:
+        return await asyncio.wait_for(
+            run_in_threadpool(_generate_lyrics_ai, data.title, data.artist, data.duration, data.style),
+            timeout=4.0
+        )
+    except Exception:
+        return {"found": False, "plain": "", "synced": [], "source": "none"}
 
 
 def _parse_lrc(lrc: str) -> list[dict]:
-    """Parse LRC (standard synchronized lyric format) timestamps into seconds and text lines.
-
-    Converts patterns like `[01:23.45] lyric line` into structured dictionaries
-    `{"time": 83.45, "text": "lyric line"}` sorted in chronological order.
-
-    Args:
-        lrc: Raw LRC formatted lyric string.
-
-    Returns:
-        list[dict]: Sorted list of timestamped lyric lines.
-    """
     lines = []
     for raw in lrc.replace("\r", "").split("\n"):
         stamps = list(LRC_STAMP.finditer(raw))
@@ -1728,52 +1730,110 @@ def _parse_lrc(lrc: str) -> list[dict]:
 
 @app.post("/api/lyrics", dependencies=[Depends(require_user)])
 async def fetch_lyrics(data: LyricsLookup) -> dict:
-    """Search for synchronized (LRC) and plain text lyrics from lrclib.net.
-
-    Ranks candidate search results based on presence of synced timestamps,
-    plain lyrics, and track duration match.
-
-    Args:
-        data: LyricsLookup payload containing track title, optional artist, and duration.
-
-    Returns:
-        dict: Dictionary containing `found` flag, plain lyrics, and synchronized timeline.
-    """
+    """Multi-stage resilient lyrics retrieval: LRCLIB /api/get -> /api/search -> lyrics.ovh -> Gemini AI."""
     require_feature("lyrics_lookup")
-    params = {"track_name": data.title.strip()}
-    if data.artist and data.artist.strip():
-        params["artist_name"] = data.artist.strip()
+    clean_title, clean_artist = _clean_track_and_artist(data.title, data.artist)
+    if not clean_title:
+        return {"found": False, "plain": "", "synced": [], "source": "none"}
+
+    headers = {"accept": "application/json", "user-agent": "ChordLab/1.0 (sheet music app)"}
+
+    # Step 1: LRCLIB direct get (/api/get) - fast, cached, never 503
     try:
-        async with httpx.AsyncClient(
-            timeout=3.0,
-            headers={"accept": "application/json", "user-agent": "ChordLab (chord sheet app)"},
-        ) as client:
-            response = await client.get("https://lrclib.net/api/search", params=params)
-        hits = response.json() if response.is_success else []
-    except (httpx.HTTPError, ValueError):
-        hits = []
-    if not isinstance(hits, list) or not hits:
-        return _generate_lyrics_ai(data.title, data.artist, data.duration, "auto")
+        get_params = {"track_name": clean_title}
+        if clean_artist:
+            get_params["artist_name"] = clean_artist
+        if data.duration:
+            get_params["duration"] = int(data.duration)
+        async with httpx.AsyncClient(timeout=3.0, headers=headers) as client:
+            resp = await client.get("https://lrclib.net/api/get", params=get_params)
+            if resp.status_code == 200:
+                hit = resp.json()
+                synced = _parse_lrc(hit.get("syncedLyrics") or "")
+                plain = (hit.get("plainLyrics") or "\n".join(l["text"] for l in synced)).strip()
+                if synced or plain:
+                    return {
+                        "found": True,
+                        "plain": plain,
+                        "synced": synced,
+                        "trackName": hit.get("trackName") or clean_title,
+                        "artistName": hit.get("artistName") or clean_artist,
+                        "source": "lrclib_get",
+                    }
+    except Exception as e:
+        print(f"[Lyrics] LRCLIB get note: {e}")
 
-    def score(hit: dict) -> float:
-        """Score candidate lyric matches based on synced availability and song duration proximity."""
-        value = 10 if hit.get("syncedLyrics") else 0
-        value += 2 if hit.get("plainLyrics") else 0
-        if data.duration and hit.get("duration"):
-            value += max(0, 6 - abs(data.duration - hit["duration"]) / 2)
-        return value
+    # Step 2: LRCLIB search (/api/search)
+    try:
+        search_query = f"{clean_artist} {clean_title}".strip() if clean_artist else clean_title
+        async with httpx.AsyncClient(timeout=3.0, headers=headers) as client:
+            resp = await client.get("https://lrclib.net/api/search", params={"q": search_query})
+            if resp.status_code == 200:
+                hits = resp.json()
+                if isinstance(hits, list) and hits:
+                    def score(h: dict) -> float:
+                        val = 10 if h.get("syncedLyrics") else 0
+                        val += 2 if h.get("plainLyrics") else 0
+                        if data.duration and h.get("duration"):
+                            val += max(0, 6 - abs(data.duration - h["duration"]) / 2)
+                        return val
+                    best = max(hits, key=score, default={})
+                    synced = _parse_lrc(best.get("syncedLyrics") or "")
+                    plain = (best.get("plainLyrics") or "\n".join(l["text"] for l in synced)).strip()
+                    if synced or plain:
+                        return {
+                            "found": True,
+                            "plain": plain,
+                            "synced": synced,
+                            "trackName": best.get("trackName") or clean_title,
+                            "artistName": best.get("artistName") or clean_artist,
+                            "source": "lrclib_search",
+                        }
+    except Exception as e:
+        print(f"[Lyrics] LRCLIB search note: {e}")
 
-    best = max((hit for hit in hits if isinstance(hit, dict)), key=score, default={})
-    synced = _parse_lrc(best["syncedLyrics"]) if best.get("syncedLyrics") else []
-    plain = (best.get("plainLyrics") or "\n".join(line["text"] for line in synced)).strip()
-    if not (plain or synced):
-        return _generate_lyrics_ai(data.title, data.artist, data.duration, "auto")
-    result = {"found": True, "plain": plain, "synced": synced}
-    if best.get("trackName"):
-        result["trackName"] = best["trackName"]
-    if best.get("artistName"):
-        result["artistName"] = best["artistName"]
-    return result
+    # Step 3: lyrics.ovh (instant fallback for western and pop catalog)
+    if clean_artist and clean_title:
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                ovh_url = f"https://api.lyrics.ovh/v1/{quote(clean_artist, safe='')}/{quote(clean_title, safe='')}"
+                resp = await client.get(ovh_url)
+                if resp.status_code == 200:
+                    raw_lyrics = str(resp.json().get("lyrics") or "").strip()
+                    if raw_lyrics:
+                        lines = [line.strip() for line in raw_lyrics.splitlines() if line.strip()]
+                        synced = []
+                        if data.duration and lines:
+                            step = max(2.0, (float(data.duration) - 10.0) / len(lines))
+                            synced = [{"time": round(5.0 + i * step, 2), "text": l} for i, l in enumerate(lines)]
+                        return {
+                            "found": True,
+                            "plain": raw_lyrics,
+                            "synced": synced,
+                            "trackName": clean_title,
+                            "artistName": clean_artist,
+                            "source": "lyrics_ovh",
+                        }
+        except Exception as e:
+            print(f"[Lyrics] lyrics.ovh note: {e}")
+
+    # Step 4: AI Generation (Gemini) with a strict 4.0s timeout guard
+    try:
+        gen = await asyncio.wait_for(
+            run_in_threadpool(_generate_lyrics_ai, clean_title, clean_artist, data.duration, "auto"),
+            timeout=4.0
+        )
+        if gen and gen.get("found"):
+            return gen
+    except Exception as e:
+        print(f"[Lyrics] AI generation note: {e}")
+
+    return {
+        "found": False,
+        "plain": "",
+        "synced": [],
+        "source": "none",
+    }
 
 
 def _tanglish_word(word: str) -> str:

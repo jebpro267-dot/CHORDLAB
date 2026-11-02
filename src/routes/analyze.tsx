@@ -125,6 +125,18 @@ async function safeDecodeAudio(
   }
 }
 
+function parseFileTitleAndArtist(raw: string): { title: string; artist: string } {
+  let name = raw.replace(/\.[^.]+$/, "");
+  name = name.replace(/--?\s*(slowed|reverb|reverbed|remix|official|video|audio|lyrics|256k|320k|8d).*$/i, "");
+  name = name.replace(/\s*[\(\[](official|video|audio|lyrics|remix|hd|4k|hq|visualizer)[^\)\]]*[\)\]]/gi, "");
+  name = name.trim();
+  const dash = name.match(/^(.{1,60}?)\s+[-–—]\s+(.+)$/);
+  if (dash) {
+    return { artist: dash[1].trim(), title: dash[2].trim() };
+  }
+  return { title: name, artist: "" };
+}
+
 function AnalyzePage() {
   const { settings } = useAppSettings();
   const navigate = useNavigate();
@@ -197,11 +209,12 @@ function AnalyzePage() {
   function onPick(f: File | null) {
     if (!f) return;
     setFile(f);
-    const inferred = f.name.replace(/\.[^.]+$/, "");
-    if (!title) setTitle(inferred);
-    toast.success(`Selected "${f.name}" — tap Detect chords below`);
+    const { title: cleanT, artist: cleanA } = parseFileTitleAndArtist(f.name);
+    if (cleanT) setTitle(cleanT);
+    if (cleanA) setArtist(cleanA);
+    toast.success(`Selected "${cleanT}" — tap Detect chords below`);
     setTimeout(() => {
-      void grabLyrics(true, inferred);
+      void grabLyrics(true, cleanT, cleanA);
     }, 200);
   }
 
@@ -336,51 +349,10 @@ function AnalyzePage() {
         }
         return res.synced;
       }
-      // If public database misses, directly generate lyrics using AI!
-      const gen = await backendJson<{ found: boolean; plain: string; synced: SyncedLine[] }>(
-        "/api/generate-lyrics",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            title: t,
-            artist: a || undefined,
-            duration: durationHint || undefined,
-          }),
-        },
-      );
-      if (gen.found && (gen.plain || gen.synced.length)) {
-        setLyrics(gen.plain);
-        setSynced(gen.synced);
-        if (!silent) toast.success("AI generated beat-synchronized lyrics!");
-        return gen.synced;
-      }
-      if (!silent) toast.error("No lyrics found or generated");
+      if (!silent) toast.info("No lyrics found in public catalog. You can paste or type them below.");
       return [];
     } catch {
-      try {
-        const gen = await backendJson<{ found: boolean; plain: string; synced: SyncedLine[] }>(
-          "/api/generate-lyrics",
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              title: t,
-              artist: a || undefined,
-              duration: durationHint || undefined,
-            }),
-          },
-        );
-        if (gen.found && (gen.plain || gen.synced.length)) {
-          setLyrics(gen.plain);
-          setSynced(gen.synced);
-          if (!silent) toast.success("AI generated beat-synchronized lyrics!");
-          return gen.synced;
-        }
-      } catch {
-        // ignore
-      }
-      if (!silent) toast.error("Lyrics lookup failed");
+      if (!silent) toast.error("Lyrics lookup timed out or failed");
       return [];
     } finally {
       setFetchingLyrics(false);
