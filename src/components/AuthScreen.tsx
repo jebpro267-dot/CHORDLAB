@@ -246,7 +246,7 @@ export function AuthScreen() {
                     type="button"
                     className="hover:underline"
                     onClick={() => {
-                      const tunnel = "https://williams-opt-review-andreas.trycloudflare.com";
+                      const tunnel = "https://enter-decent-blink-wallet.trycloudflare.com";
                       setServerUrlInput(tunnel);
                       setBackendBaseUrl(tunnel);
                       setServerStatus("Set to active Cloudflare tunnel");
@@ -268,6 +268,33 @@ export function AuthScreen() {
                 </div>
               </div>
             )}
+          </div>
+
+          <div className="pt-2 text-center">
+            <button
+              type="button"
+              onClick={() => {
+                const guestAccount = {
+                  id: "guest-local",
+                  email: "guest@chordlab.local",
+                  role: "user" as const,
+                };
+                localStorage.setItem("chordlab-user-account", JSON.stringify(guestAccount));
+                window.location.reload();
+              }}
+              className="text-xs text-muted-foreground hover:text-foreground transition underline"
+            >
+              Skip sign-in and continue as Guest
+            </button>
+          </div>
+
+          <div className="pt-3 border-t border-white/5 text-center">
+            <a
+              href="/admin/index.html"
+              className="inline-flex items-center gap-1.5 text-xs text-amber-400/80 hover:text-amber-400 transition"
+            >
+              Are you an administrator? Open Admin Portal &rarr;
+            </a>
           </div>
         </form>
       </section>

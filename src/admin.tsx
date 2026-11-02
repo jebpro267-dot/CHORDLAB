@@ -84,7 +84,11 @@ const navLabels: { key: keyof AppSettings["navigation"]; label: string }[] = [
   { key: "tuner", label: "Tuner" },
 ];
 
-const apiBase = (import.meta.env["VITE_BACKEND_URL"] || "").replace(/\/+$/, "");
+import { getBackendBaseUrl } from "./lib/backend";
+
+function getApiBase(): string {
+  return getBackendBaseUrl().replace(/\/+$/, "");
+}
 
 /**
  * Dispatches an authenticated HTTP fetch request to the administrative API endpoint.
@@ -99,7 +103,7 @@ const apiBase = (import.meta.env["VITE_BACKEND_URL"] || "").replace(/\/+$/, "");
  * @throws Error with descriptive error detail if the HTTP request returns an error code.
  */
 async function adminRequest<T>(path: string, token: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, {
+  const response = await fetch(`${getApiBase()}${path}`, {
     ...init,
     headers: {
       ...(init?.body ? { "content-type": "application/json" } : {}),
@@ -199,7 +203,7 @@ function AdminApp() {
     setBusy(true);
     setError("");
     try {
-      const response = await fetch(`${apiBase}/api/admin/login`, {
+      const response = await fetch(`${getApiBase()}/api/admin/login`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ username, password }),
@@ -325,6 +329,11 @@ function AdminApp() {
           <button type="submit" disabled={busy} className="admin-primary mt-5 w-full">
             {busy ? "Checking…" : "Sign in"}
           </button>
+          <div className="mt-4 text-center">
+            <a href="/" className="text-xs text-muted-foreground hover:text-foreground transition underline">
+              ← Back to ChordLab App
+            </a>
+          </div>
         </form>
       </main>
     );
@@ -345,7 +354,13 @@ function AdminApp() {
               <h1 className="text-xl font-semibold">Application control</h1>
             </div>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            <a
+              href="/"
+              className="admin-quiet flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-surface-2 text-xs font-semibold text-foreground hover:bg-surface-3 transition"
+            >
+              ← Back to App
+            </a>
             <button
               className="admin-quiet"
               type="button"

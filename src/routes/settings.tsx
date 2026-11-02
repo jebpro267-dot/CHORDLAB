@@ -37,6 +37,7 @@ import {
   Settings as SettingsIcon,
 
   Shield,
+  ShieldCheck,
 
   Trash2,
 
@@ -366,7 +367,7 @@ export function SettingsPage() {
 
   return (
 
-    <div className="mx-auto w-full max-w-lg px-4 overflow-x-hidden pt-6 pb-20">
+    <div className="mx-auto w-full max-w-lg px-4 pt-6 pb-20">
 
       {/* Header */}
 
@@ -397,6 +398,30 @@ export function SettingsPage() {
       <div className="space-y-6">
 
         {/* Account & Profile */}
+
+        {/* Administrator Portal */}
+        <section className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 shadow-sm backdrop-blur-md">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex size-10 items-center justify-center rounded-xl bg-amber-500/20 text-amber-400">
+                <ShieldCheck className="size-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-foreground">Administrator Console</h3>
+                <p className="text-xs text-muted-foreground">
+                  Feature flags, live model diagnostics & accounts.
+                </p>
+              </div>
+            </div>
+            <Button asChild size="sm" className="bg-amber-500 hover:bg-amber-400 text-black font-semibold shrink-0">
+              <a href="/admin/index.html">Open Admin</a>
+            </Button>
+          </div>
+          <div className="mt-3 rounded-lg bg-black/25 p-2.5 text-[11px] text-muted-foreground">
+            <span className="font-medium text-foreground">Web Browser Access:</span> Visit{" "}
+            <span className="font-mono text-primary font-medium">{getBackendBaseUrl()}/admin</span> (User: <span className="font-mono text-amber-400">jebin</span> / Pass: <span className="font-mono text-amber-400">jebpro@8898</span>).
+          </div>
+        </section>
 
         <section className="rounded-2xl border border-white/10 bg-card/60 p-4 shadow-sm backdrop-blur-md">
 
@@ -436,11 +461,9 @@ export function SettingsPage() {
 
               onClick={() => {
 
-                if (confirm("Do you want to sign out?")) {
+                void auth.signOut();
 
-                  void auth.signOut();
-
-                }
+                toast.success("Signed out of ChordLab");
 
               }}
 

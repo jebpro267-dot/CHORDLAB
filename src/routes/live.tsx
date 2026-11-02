@@ -117,7 +117,7 @@ function LivePage() {
   const perBar = 4 * division;
 
   return (
-    <div className="mx-auto w-full max-w-lg px-4 overflow-x-hidden pt-6">
+    <div className="mx-auto w-full max-w-lg px-4 pt-6">
       <h1 className="text-2xl font-semibold tracking-tight">Live chords</h1>
       <p className="mt-1 text-sm text-muted-foreground">
         One chord is locked in on every {division === 2 ? "half beat" : "beat"} while you play.

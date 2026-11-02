@@ -316,7 +316,7 @@ function SongPage() {
 
   return (
 
-    <div className="mx-auto w-full max-w-lg px-4 pt-[max(1rem,env(safe-area-inset-top,0px))] overflow-x-hidden">
+    <div className="mx-auto w-full max-w-lg px-4 pt-[max(1rem,env(safe-area-inset-top,0px))] ">
 
       <div className="flex items-center justify-between">
 

@@ -46,7 +46,7 @@ function LibraryPage() {
   );
 
   return (
-    <div className="mx-auto w-full max-w-lg px-4 overflow-x-hidden pt-6">
+    <div className="mx-auto w-full max-w-lg px-4 pt-6">
       <header>
         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-primary">
           {settings.appearance.app_name}

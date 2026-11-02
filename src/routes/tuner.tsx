@@ -87,7 +87,7 @@ function TunerPage() {
   const inTune = Math.abs(cents) <= 5 && note !== "—";
 
   return (
-    <div className="mx-auto w-full max-w-lg px-4 overflow-x-hidden pt-6">
+    <div className="mx-auto w-full max-w-lg px-4 pt-6">
       <h1 className="text-2xl font-semibold tracking-tight">Tuner</h1>
       <p className="mt-1 text-sm text-muted-foreground">Chromatic, accurate to a few cents.</p>
 

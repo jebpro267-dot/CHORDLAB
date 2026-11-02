@@ -14,7 +14,8 @@ import { useAppSettings, AppSettingsProvider } from "../lib/app-settings";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { AuthScreen } from "../components/AuthScreen";
 import { WelcomeScreen } from "../components/WelcomeScreen";
-import { LogOut, Music2 } from "lucide-react";
+import { LogOut, Music2, ShieldCheck } from "lucide-react";
+import { toast } from "sonner";
 
 function NotFoundComponent() {
   return (
@@ -192,9 +193,14 @@ function AppFrame() {
                 {settings.appearance.app_name || "ChordLab"}
               </span>
               {auth.account?.role === "admin" && (
-                <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-primary">
+                <a
+                  href="/admin/index.html"
+                  title="Open Admin Console"
+                  className="flex items-center gap-1 rounded bg-primary/25 hover:bg-primary/35 px-2 py-0.5 text-[10px] font-bold tracking-wider text-primary border border-primary/30 transition-colors active:scale-95"
+                >
+                  <ShieldCheck className="size-3" />
                   ADMIN
-                </span>
+                </a>
               )}
             </Link>
 
@@ -205,9 +211,8 @@ function AppFrame() {
               <button
                 type="button"
                 onClick={() => {
-                  if (window.confirm("Are you sure you want to sign out?")) {
-                    void auth.signOut();
-                  }
+                  void auth.signOut();
+                  toast.success("Signed out of ChordLab");
                 }}
                 title="Sign out of ChordLab"
                 aria-label="Sign out"
@@ -218,7 +223,7 @@ function AppFrame() {
             </div>
           </header>
 
-          <div className="min-h-screen pb-24 w-full max-w-full overflow-x-hidden">
+          <div className="min-h-screen pb-24 w-full">
             {ready && unavailable ? (
               <div className="mx-auto mt-20 max-w-md px-5 text-center">
                 <h1 className="text-xl font-semibold">This feature is temporarily unavailable</h1>
