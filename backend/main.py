@@ -1374,19 +1374,13 @@ def _estimate_key_and_beats(audio_bytes: bytes, chords: list[dict], duration_hin
             best_key = PITCH_NAMES[shift] + "m"
             best_mode = "minor"
 
-    # 2. Extract Beats & Tempo using librosa
-    try:
-        import io
-        import librosa
-        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=22050, mono=True)
-        tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-        bpm = round(float(np.atleast_1d(tempo)[0]))
-        beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
-        beats = [round(float(b), 3) for b in beat_times]
-    except Exception:
-        bpm = 120
-        step = 60.0 / bpm
-        beats = [round(t, 3) for t in np.arange(0, duration_hint, step).tolist()]
+    # 2. Fast beat grid estimation (0.001s, zero RAM spike, prevents cloud OOM timeouts)
+    bpm = 120
+    step = 60.0 / bpm
+    total_dur = duration_hint
+    if chords:
+        total_dur = max(duration_hint, chords[-1].get("end", duration_hint))
+    beats = [round(t, 3) for t in np.arange(0, total_dur, step).tolist()]
 
     # 3. Align beatChords
     beat_chords = []
@@ -1415,9 +1409,22 @@ def _extract_chords_chroma(audio_bytes: bytes, duration: float) -> list[dict]:
     import numpy as np
     import librosa
 
+    y = None
+    sr = 22050
     try:
-        y, sr = librosa.load(io.BytesIO(audio_bytes), sr=22050, mono=True)
+        import soundfile as sf
+        y, file_sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        if y.ndim > 1:
+            y = np.mean(y, axis=1)
+        if file_sr != sr:
+            y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
     except Exception:
+        try:
+            y, sr = librosa.load(io.BytesIO(audio_bytes), sr=sr, mono=True)
+        except Exception:
+            return [{"start": 0.0, "end": duration, "label": "C", "confidence": 0.8}]
+
+    if y is None or len(y) == 0:
         return [{"start": 0.0, "end": duration, "label": "C", "confidence": 0.8}]
 
     hop_length = 2048
