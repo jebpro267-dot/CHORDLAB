@@ -20,6 +20,7 @@ interface Props {
 /**
  * Renders an Ultimate-Guitar style monospace chord sheet with section headers,
  * transposed chord positions aligned above lyrics, and synchronized playback highlights.
+ * Adjusts chord shapes relative to capo fret (capo transposition).
  *
  * @param props - Chord sheet view properties including sheet model, metadata, transposition, and zoom.
  * @param ref - React ref forwarded to the outer container element for printing/exporting.
@@ -41,14 +42,19 @@ export const ChordSheetView = forwardRef<HTMLDivElement, Props>(function ChordSh
   },
   ref,
 ) {
+  const effectiveTranspose = (transpose || 0) - (capo || 0);
+  const playKey = capo ? transposeChord(keyLabel, -capo, useFlats) : "";
+
   return (
     <div ref={ref} className="rounded-xl bg-sheet p-4 text-sheet-foreground">
       <header className="mb-4 border-b border-border pb-3">
         <h2 className="text-lg font-semibold leading-tight">{title || "Untitled"}</h2>
         {artist && <p className="text-sm text-muted-foreground">{artist}</p>}
         <p className="mt-2 font-mono text-[11px] text-muted-foreground">
-          Key {keyLabel} · {Math.round(bpm)} BPM · Capo {capo ? `fret ${capo}` : "none"}
+          Key {keyLabel}
+          {capo ? ` (Play ${playKey} shapes with Capo fret ${capo})` : " · Capo: none"}
           {transpose ? ` · Transposed ${transpose > 0 ? "+" : ""}${transpose}` : ""}
+          {` · ${Math.round(bpm)} BPM`}
         </p>
       </header>
 
@@ -62,7 +68,7 @@ export const ChordSheetView = forwardRef<HTMLDivElement, Props>(function ChordSh
               <div key={li} className="mb-1">
                 {line.chords.length > 0 && (
                   <pre className="whitespace-pre font-mono">
-                    {renderChordLine(line.chords, transpose, useFlats, activeChordTime)}
+                    {renderChordLine(line.chords, effectiveTranspose, useFlats, activeChordTime)}
                   </pre>
                 )}
                 {line.lyric && <pre className="whitespace-pre-wrap">{line.lyric}</pre>}

@@ -870,6 +870,15 @@ async def chord_model(
 
     duration = 180.0
     try:
+        import io
+        import soundfile as sf
+        info = sf.info(io.BytesIO(audio))
+        if info.duration and info.duration > 0:
+            duration = float(info.duration)
+    except Exception:
+        pass
+
+    try:
         chords = await run_in_threadpool(_extract_chords_chroma, audio, duration)
         metrics = await run_in_threadpool(_estimate_key_and_beats, audio, chords, duration)
     except Exception as error:
@@ -1067,9 +1076,9 @@ def _separate_audio(audio: bytes, filename: str) -> bytes:
         demucs_ok = False
         try:
             subprocess.run(
-                [demucs_python, str(script), "-n", model, "--float32", "-o", str(output), str(source)],
+                [demucs_python, str(script), "-n", model, "--shifts", "0", "--float32", "-o", str(output), str(source)],
                 check=True,
-                timeout=600,
+                timeout=35,
                 capture_output=True,
                 text=True,
                 env=env,
@@ -1376,62 +1385,105 @@ def _download_url_audio(url: str) -> dict:
 
 
 def _estimate_key_and_beats(audio_bytes: bytes, chords: list[dict], duration_hint: float = 180.0):
+    import io
     import numpy as np
+    import librosa
+    import soundfile as sf
 
     PITCH_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+
+    y = None
+    sr = 22050
+    try:
+        y, file_sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+        if y.ndim > 1:
+            y = np.mean(y, axis=1)
+        if file_sr != sr:
+            y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
+    except Exception:
+        try:
+            y, sr = librosa.load(io.BytesIO(audio_bytes), sr=sr, mono=True)
+        except Exception:
+            pass
+
+    real_dur = float(len(y) / sr) if y is not None and len(y) > 0 else float(duration_hint or 180.0)
+
+    # 1. Real BPM and Beat Tracking with Librosa
+    bpm = 120
+    beats = []
+    if y is not None and len(y) > sr * 1.5:
+        try:
+            tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=512)
+            raw_bpm = float(tempo[0] if isinstance(tempo, (list, np.ndarray)) else tempo)
+            if raw_bpm > 0:
+                bpm = int(round(raw_bpm))
+            beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=512)
+            beats = [round(float(b), 3) for b in beat_times]
+        except Exception as e:
+            print(f"[BeatTrack] warning: {e}")
+
+    if not beats:
+        step = 60.0 / max(40, bpm)
+        beats = [round(t, 3) for t in np.arange(0, real_dur, step).tolist()]
+
+    # 2. Real Key Estimation using Krumhansl-Kessler Profile on Audio Chromagram
     MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
     MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
 
-    # 1. Estimate Key
-    chroma = np.zeros(12)
-    for c in chords:
-        lbl = c.get("label", "")
-        if not lbl or lbl in ("N", "X"):
-            continue
-        dur = max(0.1, float(c.get("end", 0)) - float(c.get("start", 0)))
-        m = re.match(r"^([A-Ga-g][b#]?)(.*)$", lbl)
-        if not m:
-            continue
-        r_name = m.group(1).capitalize()
-        enh = {"C#": "Db", "D#": "Eb", "F#": "Gb", "G#": "Ab", "A#": "Bb"}
-        r_name = enh.get(r_name, r_name)
-        if r_name not in PITCH_NAMES:
-            continue
-        r_pc = PITCH_NAMES.index(r_name)
-        q = m.group(2).lower()
-        is_min = "m" in q and "maj" not in q
-        third = (r_pc + 3 if is_min else r_pc + 4) % 12
-        fifth = (r_pc + 7) % 12
-        chroma[r_pc] += dur * 1.6
-        chroma[third] += dur
-        chroma[fifth] += dur
+    chroma_avg = np.zeros(12)
+    if y is not None and len(y) > 0:
+        try:
+            chroma_mat = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=1024)
+            chroma_avg = np.mean(chroma_mat, axis=1)
+        except Exception:
+            pass
 
-    norm = chroma / (np.sum(chroma) or 1.0)
+    if np.sum(chroma_avg) <= 0:
+        for c in chords:
+            lbl = c.get("label", "")
+            if not lbl or lbl in ("N", "X"):
+                continue
+            dur = max(0.1, float(c.get("end", 0)) - float(c.get("start", 0)))
+            m = re.match(r"^([A-Ga-g][b#]?)(.*)$", lbl)
+            if not m:
+                continue
+            r_name = m.group(1).capitalize()
+            enh = {"C#": "Db", "D#": "Eb", "F#": "Gb", "G#": "Ab", "A#": "Bb"}
+            r_name = enh.get(r_name, r_name)
+            if r_name not in PITCH_NAMES:
+                continue
+            r_pc = PITCH_NAMES.index(r_name)
+            q = m.group(2).lower()
+            is_min = "m" in q and "maj" not in q
+            third = (r_pc + 3 if is_min else r_pc + 4) % 12
+            fifth = (r_pc + 7) % 12
+            chroma_avg[r_pc] += dur * 1.6
+            chroma_avg[third] += dur
+            chroma_avg[fifth] += dur
+
+    # Pearson correlation across all 12 shifts
     best_key = "C"
     best_pc = 0
     best_mode = "major"
     best_score = -1e9
-    for shift in range(12):
-        maj_sc = float(np.dot(np.roll(norm, -shift), MAJOR_PROFILE))
-        min_sc = float(np.dot(np.roll(norm, -shift), MINOR_PROFILE))
-        if maj_sc > best_score:
-            best_score = maj_sc
-            best_pc = shift
-            best_key = PITCH_NAMES[shift]
-            best_mode = "major"
-        if min_sc > best_score:
-            best_score = min_sc
-            best_pc = shift
-            best_key = PITCH_NAMES[shift] + "m"
-            best_mode = "minor"
-
-    # 2. Fast beat grid estimation (0.001s, zero RAM spike, prevents cloud OOM timeouts)
-    bpm = 120
-    step = 60.0 / bpm
-    total_dur = duration_hint
-    if chords:
-        total_dur = max(duration_hint, chords[-1].get("end", duration_hint))
-    beats = [round(t, 3) for t in np.arange(0, total_dur, step).tolist()]
+    if np.std(chroma_avg) > 0:
+        norm_c = (chroma_avg - np.mean(chroma_avg)) / np.std(chroma_avg)
+        maj_p_norm = (MAJOR_PROFILE - np.mean(MAJOR_PROFILE)) / np.std(MAJOR_PROFILE)
+        min_p_norm = (MINOR_PROFILE - np.mean(MINOR_PROFILE)) / np.std(MINOR_PROFILE)
+        for shift in range(12):
+            rolled = np.roll(norm_c, -shift)
+            maj_sc = float(np.dot(rolled, maj_p_norm) / 12.0)
+            min_sc = float(np.dot(rolled, min_p_norm) / 12.0)
+            if maj_sc > best_score:
+                best_score = maj_sc
+                best_pc = shift
+                best_key = PITCH_NAMES[shift]
+                best_mode = "major"
+            if min_sc > best_score:
+                best_score = min_sc
+                best_pc = shift
+                best_key = PITCH_NAMES[shift] + "m"
+                best_mode = "minor"
 
     # 3. Align beatChords
     beat_chords = []
@@ -1452,7 +1504,6 @@ def _estimate_key_and_beats(audio_bytes: bytes, chords: list[dict], duration_hin
         "timeSignature": 4,
         "beatChords": beat_chords,
     }
-
 
 
 def _extract_chords_chroma(audio_bytes: bytes, duration: float) -> list[dict]:
@@ -1674,29 +1725,40 @@ def _generate_lyrics_ai(title: str, artist: str | None, duration: float | None, 
     track_name = title.strip()
     artist_name = (artist or "").strip()
     dur = float(duration or 180)
-    prompt = f"""Generate synchronized lyrics with timestamps [mm:ss.xx] for:
+    prompt = f"""You are an expert music assistant. Generate accurate synchronized lyrics with timestamps [mm:ss.xx] for:
 \"{track_name}\" by \"{artist_name or 'Unknown Artist'}\"
 Approximate duration: {int(dur)} seconds.
-Output only lines formatted like:
+Output only lines formatted with timestamps, like:
 [00:10.00] lyric line here
-[00:15.00] next lyric line"""
+[00:15.50] next lyric line
+Ensure realistic timestamp progression across the entire song."""
 
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={key}"
-        with httpx.Client(timeout=3.5) as client:
-            resp = client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
-            if resp.status_code == 200:
-                data = resp.json()
-                candidates = data.get("candidates", [])
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    text = "".join(p.get("text", "") for p in parts)
-                    lines = _parse_lrc(text)
-                    if lines:
-                        plain = "\n".join(l["text"] for l in lines)
-                        return {"found": True, "generated": True, "plain": plain, "synced": lines, "source": "gemini"}
-    except Exception as e:
-        print(f"[Gemini] Lyric generation error: {e}")
+    for model_name in ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        text = "".join(p.get("text", "") for p in parts)
+                        lines = _parse_lrc(text)
+                        if lines:
+                            plain = "\n".join(l["text"] for l in lines)
+                            return {
+                                "found": True,
+                                "generated": True,
+                                "plain": plain,
+                                "synced": lines,
+                                "trackName": track_name,
+                                "artistName": artist_name,
+                                "source": f"gemini_{model_name}",
+                            }
+        except Exception as e:
+            print(f"[Gemini {model_name}] error: {e}")
+            continue
 
     return {"found": False, "plain": "", "synced": [], "source": "none"}
 
@@ -1705,10 +1767,7 @@ Output only lines formatted like:
 async def generate_lyrics_endpoint(data: GenerateLyricsRequest) -> dict:
     require_feature("lyrics_lookup")
     try:
-        return await asyncio.wait_for(
-            run_in_threadpool(_generate_lyrics_ai, data.title, data.artist, data.duration, data.style),
-            timeout=4.0
-        )
+        return await run_in_threadpool(_generate_lyrics_ai, data.title, data.artist, data.duration, data.style)
     except Exception:
         return {"found": False, "plain": "", "synced": [], "source": "none"}
 
@@ -1730,15 +1789,23 @@ def _parse_lrc(lrc: str) -> list[dict]:
 
 @app.post("/api/lyrics", dependencies=[Depends(require_user)])
 async def fetch_lyrics(data: LyricsLookup) -> dict:
-    """Multi-stage resilient lyrics retrieval: LRCLIB /api/get -> /api/search -> lyrics.ovh -> Gemini AI."""
+    """Lyrics retrieval: Gemini AI generation first, with LRCLIB and lyrics.ovh fallbacks."""
     require_feature("lyrics_lookup")
     clean_title, clean_artist = _clean_track_and_artist(data.title, data.artist)
     if not clean_title:
         return {"found": False, "plain": "", "synced": [], "source": "none"}
 
+    # Step 1: AI Generation via Gemini (primary method as requested by user)
+    try:
+        gen = await run_in_threadpool(_generate_lyrics_ai, clean_title, clean_artist, data.duration, "auto")
+        if gen and gen.get("found"):
+            return gen
+    except Exception as e:
+        print(f"[Lyrics] Gemini AI generation note: {e}")
+
     headers = {"accept": "application/json", "user-agent": "ChordLab/1.0 (sheet music app)"}
 
-    # Step 1: LRCLIB direct get (/api/get) - fast, cached, never 503
+    # Step 2: LRCLIB direct get (/api/get)
     try:
         get_params = {"track_name": clean_title}
         if clean_artist:
@@ -1763,36 +1830,7 @@ async def fetch_lyrics(data: LyricsLookup) -> dict:
     except Exception as e:
         print(f"[Lyrics] LRCLIB get note: {e}")
 
-    # Step 2: LRCLIB search (/api/search)
-    try:
-        search_query = f"{clean_artist} {clean_title}".strip() if clean_artist else clean_title
-        async with httpx.AsyncClient(timeout=3.0, headers=headers) as client:
-            resp = await client.get("https://lrclib.net/api/search", params={"q": search_query})
-            if resp.status_code == 200:
-                hits = resp.json()
-                if isinstance(hits, list) and hits:
-                    def score(h: dict) -> float:
-                        val = 10 if h.get("syncedLyrics") else 0
-                        val += 2 if h.get("plainLyrics") else 0
-                        if data.duration and h.get("duration"):
-                            val += max(0, 6 - abs(data.duration - h["duration"]) / 2)
-                        return val
-                    best = max(hits, key=score, default={})
-                    synced = _parse_lrc(best.get("syncedLyrics") or "")
-                    plain = (best.get("plainLyrics") or "\n".join(l["text"] for l in synced)).strip()
-                    if synced or plain:
-                        return {
-                            "found": True,
-                            "plain": plain,
-                            "synced": synced,
-                            "trackName": best.get("trackName") or clean_title,
-                            "artistName": best.get("artistName") or clean_artist,
-                            "source": "lrclib_search",
-                        }
-    except Exception as e:
-        print(f"[Lyrics] LRCLIB search note: {e}")
-
-    # Step 3: lyrics.ovh (instant fallback for western and pop catalog)
+    # Step 3: lyrics.ovh
     if clean_artist and clean_title:
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
@@ -1817,24 +1855,12 @@ async def fetch_lyrics(data: LyricsLookup) -> dict:
         except Exception as e:
             print(f"[Lyrics] lyrics.ovh note: {e}")
 
-    # Step 4: AI Generation (Gemini) with a strict 4.0s timeout guard
-    try:
-        gen = await asyncio.wait_for(
-            run_in_threadpool(_generate_lyrics_ai, clean_title, clean_artist, data.duration, "auto"),
-            timeout=4.0
-        )
-        if gen and gen.get("found"):
-            return gen
-    except Exception as e:
-        print(f"[Lyrics] AI generation note: {e}")
-
     return {
         "found": False,
         "plain": "",
         "synced": [],
         "source": "none",
     }
-
 
 def _tanglish_word(word: str) -> str:
     """Transliterate a single Tamil word into phonetic Tanglish (Roman script).

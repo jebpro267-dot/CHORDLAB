@@ -7,7 +7,7 @@
  *  2. VITE_BACKEND_URL env var (set at build time)
  *  3. PERMANENT_BACKEND_URL hard-coded fallback (Cloudflare tunnel / production server)
  */
-export const PERMANENT_BACKEND_URL = "https://certification-manga-framing-varied.trycloudflare.com";
+export const PERMANENT_BACKEND_URL = "https://enter-decent-blink-wallet.trycloudflare.com";
 
 /**
  * Returns the currently active backend base URL.
