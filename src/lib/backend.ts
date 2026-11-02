@@ -1,23 +1,22 @@
 /**
  * Returns the currently active backend base URL.
  * Checks localStorage for user-specified server override, falling back to VITE_BACKEND_URL.
+ *
+ * Priority:
+ *  1. Value stored in localStorage under "chordlab_backend_url"
+ *  2. VITE_BACKEND_URL env var (set at build time)
+ *  3. PERMANENT_BACKEND_URL hard-coded fallback (Cloudflare tunnel / production server)
  */
-export const PERMANENT_BACKEND_URL = "https://chordlab-backend-7myv.onrender.com";
+export const PERMANENT_BACKEND_URL = "https://certification-manga-framing-varied.trycloudflare.com";
 
 /**
  * Returns the currently active backend base URL.
- * Defaults permanently to the 24/7 cloud server (Render) so users never need to configure it manually.
+ * Users can override the server from Settings — any https:// URL (including LAN IPs) is accepted.
  */
 export function getBackendBaseUrl(): string {
   try {
     const custom = localStorage.getItem("chordlab_backend_url");
-    if (
-      custom &&
-      custom.trim() &&
-      !custom.includes("localhost") &&
-      !custom.includes("127.0.0.1") &&
-      !custom.includes("192.168.")
-    ) {
+    if (custom && custom.trim()) {
       return custom.trim().replace(/\/+$/, "");
     }
   } catch {
