@@ -1006,7 +1006,7 @@ function AnalyzePage() {
 
   return (
 
-    <div className="mx-auto max-w-lg px-4 pt-6">
+    <div className="mx-auto w-full max-w-lg px-4 overflow-x-hidden pt-6">
 
       <h1 className="text-2xl font-semibold tracking-tight">Analyze a song</h1>
 

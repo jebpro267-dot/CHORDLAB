@@ -145,10 +145,25 @@ def _audio_features(audio: bytes) -> tuple[Any, float]:
             "Audio model dependencies are missing; install backend/requirements-ml.txt"
         ) from error
 
+    samples = None
     try:
         samples, _ = librosa.load(io.BytesIO(audio), sr=SAMPLE_RATE, mono=True)
-    except Exception as error:
-        raise ValueError(f"Could not decode audio for chord recognition: {error}") from error
+    except Exception:
+        import tempfile
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".audio", delete=False) as tmp:
+                tmp.write(audio)
+                tmp_path = tmp.name
+            samples, _ = librosa.load(tmp_path, sr=SAMPLE_RATE, mono=True)
+        except Exception as error:
+            raise ValueError(f"Could not decode audio for chord recognition: {error}") from error
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
     duration = len(samples) / SAMPLE_RATE
     if duration == 0:
         raise ValueError("The audio file contains no samples")

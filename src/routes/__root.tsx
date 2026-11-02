@@ -218,7 +218,7 @@ function AppFrame() {
             </div>
           </header>
 
-          <div className="min-h-screen pb-24">
+          <div className="min-h-screen pb-24 w-full max-w-full overflow-x-hidden">
             {ready && unavailable ? (
               <div className="mx-auto mt-20 max-w-md px-5 text-center">
                 <h1 className="text-xl font-semibold">This feature is temporarily unavailable</h1>

@@ -19,7 +19,7 @@ interface Props {
 
 /**
  * Renders an Ultimate-Guitar style monospace chord sheet with section headers,
- * transposed chord positions aligned above lyrics, and synchronized playback highlights.
+ * transposed chord positions aligned strictly above lyrics, and synchronized playback highlights.
  * Adjusts chord shapes relative to capo fret (capo transposition).
  *
  * @param props - Chord sheet view properties including sheet model, metadata, transposition, and zoom.
@@ -46,7 +46,7 @@ export const ChordSheetView = forwardRef<HTMLDivElement, Props>(function ChordSh
   const playKey = capo ? transposeChord(keyLabel, -capo, useFlats) : "";
 
   return (
-    <div ref={ref} className="rounded-xl bg-sheet p-4 text-sheet-foreground">
+    <div ref={ref} className="w-full max-w-full overflow-hidden rounded-xl bg-sheet p-4 text-sheet-foreground">
       <header className="mb-4 border-b border-border pb-3">
         <h2 className="text-lg font-semibold leading-tight">{title || "Untitled"}</h2>
         {artist && <p className="text-sm text-muted-foreground">{artist}</p>}
@@ -58,27 +58,38 @@ export const ChordSheetView = forwardRef<HTMLDivElement, Props>(function ChordSh
         </p>
       </header>
 
-      <div style={{ fontSize: `${fontSize}px`, lineHeight: 1.45 }} className="font-mono">
-        {sheet.sections.map((section, si) => (
-          <section key={si} className="mb-5">
-            <h3 className="mb-1 font-sans text-xs font-bold uppercase tracking-widest text-accent">
-              [{section.name}]
-            </h3>
-            {section.lines.map((line, li) => (
-              <div key={li} className="mb-1">
-                {line.chords.length > 0 && (
-                  <pre className="whitespace-pre font-mono">
-                    {renderChordLine(line.chords, effectiveTranspose, useFlats, activeChordTime)}
-                  </pre>
-                )}
-                {line.lyric && <pre className="whitespace-pre-wrap">{line.lyric}</pre>}
-                {showRoman && line.roman && (
-                  <pre className="whitespace-pre-wrap text-muted-foreground">{line.roman}</pre>
-                )}
-              </div>
-            ))}
-          </section>
-        ))}
+      <div className="w-full overflow-x-auto scrollbar-thin">
+        <div
+          style={{ fontSize: `${fontSize}px`, lineHeight: 1.55 }}
+          className="min-w-full font-mono tracking-normal select-text"
+        >
+          {sheet.sections.map((section, si) => (
+            <section key={si} className="mb-5">
+              <h3 className="mb-1 font-sans text-xs font-bold uppercase tracking-widest text-accent">
+                [{section.name}]
+              </h3>
+              {section.lines.map((line, li) => (
+                <div key={li} className="mb-1.5 font-mono tracking-normal">
+                  {line.chords.length > 0 && (
+                    <pre className="whitespace-pre font-mono tracking-normal select-text">
+                      {renderChordLine(line.chords, effectiveTranspose, useFlats, activeChordTime)}
+                    </pre>
+                  )}
+                  {line.lyric && (
+                    <pre className="whitespace-pre font-mono tracking-normal text-sheet-foreground select-text">
+                      {line.lyric}
+                    </pre>
+                  )}
+                  {showRoman && line.roman && (
+                    <pre className="whitespace-pre font-mono tracking-normal text-muted-foreground select-text">
+                      {line.roman}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </section>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -109,12 +120,23 @@ function renderChordLine(
     const label = transposeChord(c.label, transpose, useFlats);
     const active = activeTime != null && Math.abs(activeTime - c.time) < 0.001;
     out.push(
-      <span key={i} className={active ? "chord-token rounded bg-primary/25 px-0.5" : "chord-token"}>
+      <span
+        key={i}
+        className={
+          active
+            ? "chord-token rounded-xs bg-primary/30 ring-1 ring-primary/80 text-primary-foreground font-bold"
+            : "chord-token font-bold"
+        }
+      >
         {label}
       </span>,
     );
-    out.push(" ");
-    col += label.length + 1;
+    col += label.length;
+    // If next chord is placed at or before the end of this label, guarantee at least 1 separator space
+    if (chords[i + 1] && chords[i + 1]!.pos <= col) {
+      out.push(" ");
+      col += 1;
+    }
   });
   return out;
 }
